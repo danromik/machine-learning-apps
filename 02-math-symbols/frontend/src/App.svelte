@@ -96,20 +96,6 @@
     return subs;
   });
 
-  $effect(() => {
-    (async () => {
-      try {
-        const { device } = await api.device();
-        ui.device = device;
-        ui.status = 'ready';
-      } catch (e) {
-        const msg = (e as Error).message || String(e);
-        ui.status = `backend unreachable: ${msg} — is the server on :5041?`;
-        console.error('initial fetch failed', e);
-      }
-    })();
-  });
-
   // Load synthesis state at app start so every tab can rely on it. Without
   // this, going Orientation → Architecture → Training (skipping the Data
   // Synthesis tab) leaves synthesis.loaded = false, which breaks Training
@@ -131,6 +117,57 @@
         console.error('synthesis preload failed', e);
       }
     })();
+  });
+
+  // Whenever the data synthesis config changes (categories, font usage,
+  // augmentation), invalidate any architecture and training session
+  // built against the old config — class identity / count is determined
+  // by selectedCategories, so the existing model's class table won't
+  // line up with new batches. JSON.stringify is enough to track the
+  // deep state via Svelte's reactive proxies.
+  let lastSynthesisSig: string | null = null;
+  $effect(() => {
+    const sig = JSON.stringify({
+      cats: synthesis.selectedCategories,
+      fonts: synthesis.fontUsage,
+      aug: synthesis.augmentation,
+    });
+    if (!synthesis.loaded) return;
+    if (lastSynthesisSig === null) {
+      lastSynthesisSig = sig;
+      return;
+    }
+    if (sig === lastSynthesisSig) return;
+    lastSynthesisSig = sig;
+
+    // Architecture → empty layer list, no stale suggestion.
+    architecture.layers = [];
+    architecture.suggestionReasoning = null;
+
+    // Training session state → fully reset. We also clear the batch
+    // so that if the user is on a non-Training tab when the synthesis
+    // config changes, returning to Training won't show a stale batch
+    // (rendered against the old fonts/categories).
+    training.hasSession = false;
+    training.numClasses = 0;
+    training.paramCount = 0;
+    training.step = 0;
+    training.lastLoss = null;
+    training.lastAccuracy = null;
+    training.lossHistory = [];
+    training.valLossHistory = [];
+    training.batch = [];
+    training.predictions = [];
+    training.batchVerdict = [];
+    training.batchChartCounts = { correct: 0, incorrect: 0, total: 0 };
+    training.selectedIndex = null;
+    training.animating = false;
+
+    // Tell the backend so the next train_batch / eval doesn't hit a
+    // stale session. Fire-and-forget — failures don't block the UI.
+    api.resetTraining().catch((e) =>
+      console.warn('training reset failed:', e)
+    );
   });
 </script>
 

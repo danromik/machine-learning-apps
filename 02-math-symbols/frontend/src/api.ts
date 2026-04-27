@@ -57,8 +57,34 @@ export type SessionState =
 
 export type TrainBatchResult = { loss: number; step: number; accuracy: number };
 
+export type Device = {
+  name: string;
+  label: string;
+  cores?: number;
+  clock_hz?: number;
+  memory_bytes?: number | null;
+  memory_note?: string;
+  available: boolean;
+};
+
+export type DeviceList = {
+  current: string;
+  devices: Device[];
+  session_loaded: boolean;
+  param_count: number;
+};
+
 export const api = {
   device: () => j<{ device: string }>(fetch('/api/device')),
+  deviceList: () => j<DeviceList>(fetch('/api/device/list')),
+  deviceSelect: (name: string) =>
+    j<{ current: string }>(
+      fetch('/api/device/select', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      })
+    ),
   symbols: () =>
     j<{ categories: SymbolCategory[] }>(fetch('/api/synthesis/symbols')),
   fonts: () => j<{ fonts: Font[] }>(fetch('/api/synthesis/fonts')),
@@ -79,6 +105,10 @@ export const api = {
       })
     ),
   trainingState: () => j<SessionState>(fetch('/api/training/state')),
+  resetTraining: () =>
+    j<{ has_session: false }>(
+      fetch('/api/training/reset', { method: 'POST' })
+    ),
   predict: (images: string[]) =>
     j<{ predictions: number[][] }>(
       fetch('/api/training/predict', {
@@ -98,6 +128,14 @@ export const api = {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ images, labels, lr, optimizer }),
+      })
+    ),
+  evalBatch: (images: string[], labels: string[]) =>
+    j<{ loss: number; accuracy: number }>(
+      fetch('/api/training/eval', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ images, labels }),
       })
     ),
   listCheckpoints: () =>
@@ -136,6 +174,13 @@ export const api = {
     ),
 };
 
+export type InferencePrediction = {
+  char: string;
+  png_b64: string | null;
+  font: string | null;
+  confidence: number;
+};
+
 export type InferenceItem = {
   char: string;
   input_png_b64: string | null;
@@ -145,6 +190,7 @@ export type InferenceItem = {
   predicted_font: string | null;
   confidence: number | null;
   in_class_set: boolean;
+  top_k: InferencePrediction[];
 };
 
 export type SynthesisSample = {

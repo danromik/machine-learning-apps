@@ -29,23 +29,28 @@
     return idx >= 0 ? idx : null;
   });
 
-  // Track the chart container's pixel width so we can size bars to fit
+  // Track the chart container's pixel size so we can size bars to fit
   // exactly — no horizontal scroll, no preserveAspectRatio="none" text
-  // distortion. svelte-bound clientWidth uses ResizeObserver under the
-  // hood and updates reactively.
+  // distortion. Bound clientWidth/Height use ResizeObserver under the
+  // hood and update reactively.
   let containerWidth = $state(0);
+  let containerHeight = $state(0);
 
   let n = $derived(classes.length);
   const GAP = 1;
   const HEADER_H = 14;
   const FOOTER_H = 14;
-  const PLOT_H = 120;
-  const svgH = HEADER_H + PLOT_H + FOOTER_H;
+  const MIN_PLOT_H = 60;
 
-  // SVG width tracks the container (1:1, so coordinates equal pixels).
-  // Bar width is whatever's left after subtracting the inter-bar gaps —
-  // can go subpixel for very large class counts; the browser handles AA.
+  // SVG dimensions track the container (1:1, so coordinates equal
+  // pixels). Width drives bar width; height drives plot height — that's
+  // how this chart matches the BatchChart's vertical extent in a side-
+  // by-side layout instead of stopping at a fixed 148-pixel SVG.
   let svgW = $derived(Math.max(1, containerWidth));
+  let svgH = $derived(
+    Math.max(HEADER_H + MIN_PLOT_H + FOOTER_H, containerHeight || 1)
+  );
+  let PLOT_H = $derived(Math.max(MIN_PLOT_H, svgH - HEADER_H - FOOTER_H));
   let BAR_W = $derived.by(() => {
     if (n <= 0 || svgW <= 0) return 0;
     return Math.max(0.5, (svgW - GAP) / n - GAP);
@@ -67,14 +72,14 @@
         >{classes[predictedIdx]}</span>
         ({(probs[predictedIdx] * 100).toFixed(1)}%)
       </span>
-    {:else if !probs}
-      <span class="text-[var(--color-muted)]">
-        — select an image
-      </span>
     {/if}
   </header>
 
-  <div bind:clientWidth={containerWidth} class="flex-1 min-h-0 min-w-0">
+  <div
+    bind:clientWidth={containerWidth}
+    bind:clientHeight={containerHeight}
+    class="flex-1 min-h-0 min-w-0"
+  >
     <svg
       width={svgW}
       height={svgH}

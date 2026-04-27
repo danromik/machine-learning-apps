@@ -5,8 +5,6 @@ export type TabId = 'orientation' | 'data' | 'architecture' | 'training' | 'infe
 
 export const ui = $state({
   activeTab: 'orientation' as TabId,
-  device: '' as string,
-  status: 'idle' as string,
 });
 
 // Bumped when the active theme changes, so chart components can rebuild
@@ -134,6 +132,15 @@ export const training = $state({
     incorrect: number;
     total: number;
   },
+
+  // Loss curves for the bottom-right panel. lossHistory gets one point
+  // per train_batch step; valLossHistory is sparser (every Nth step,
+  // computed via /api/training/eval on a freshly-rendered val batch).
+  // Both reset when the model is reinitialized or a checkpoint is
+  // loaded — they're only meaningful for the current session.
+  lossHistory: [] as { step: number; loss: number }[],
+  valLossHistory: [] as { step: number; loss: number }[],
+  validateEveryN: 10,
   // Last train_batch loss + top-1 accuracy on that batch, for display.
   lastLoss: null as number | null,
   lastAccuracy: null as number | null,

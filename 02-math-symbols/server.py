@@ -18,6 +18,7 @@ Endpoints:
 from __future__ import annotations
 
 import json
+import platform
 import sys
 from pathlib import Path
 
@@ -61,9 +62,140 @@ app.add_middleware(
 )
 
 
+def _sysctl(name: str) -> str | None:
+    """Best-effort macOS sysctl lookup; None on any failure."""
+    import subprocess
+
+    try:
+        r = subprocess.run(
+            ["sysctl", "-n", name], capture_output=True, text=True, timeout=2
+        )
+        out = r.stdout.strip()
+        return out or None
+    except Exception:
+        return None
+
+
+def _system_memory_bytes() -> int | None:
+    """Total physical memory, in bytes. macOS via sysctl; Linux via /proc."""
+    import os
+
+    val = _sysctl("hw.memsize")
+    if val:
+        try:
+            return int(val)
+        except ValueError:
+            pass
+    try:
+        pages = os.sysconf("SC_PHYS_PAGES")
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        if pages > 0 and page_size > 0:
+            return pages * page_size
+    except (ValueError, OSError):
+        pass
+    return None
+
+
+def _device_descriptor(name: str) -> dict:
+    """Return display info for a torch device key ('cpu' / 'mps' / 'cuda').
+
+    Memory is unified on Apple Silicon, so cpu and mps both report the
+    system's total RAM; the mps entry includes a `memory_note` so the UI
+    can flag that.
+    """
+    info: dict = {"name": name}
+    mem = _system_memory_bytes()
+    if name == "cpu":
+        info["label"] = (
+            _sysctl("machdep.cpu.brand_string")
+            or platform.processor()
+            or platform.machine()
+            or "CPU"
+        )
+        cores = _sysctl("hw.ncpu")
+        if cores:
+            try:
+                info["cores"] = int(cores)
+            except ValueError:
+                pass
+        clock = _sysctl("hw.cpufrequency_max")  # only set on older Intel macs
+        if clock:
+            try:
+                info["clock_hz"] = int(clock)
+            except ValueError:
+                pass
+        info["memory_bytes"] = mem
+    elif name == "mps":
+        chip = _sysctl("machdep.cpu.brand_string") or "Apple Silicon"
+        info["label"] = f"GPU ({chip})"
+        info["memory_bytes"] = mem
+        info["memory_note"] = "unified with CPU"
+    elif name == "cuda":
+        if torch.cuda.is_available():
+            props = torch.cuda.get_device_properties(0)
+            info["label"] = props.name
+            info["memory_bytes"] = props.total_memory
+            # CUDA exposes a SM clock rate in kHz via properties on newer
+            # PyTorch versions; fall back if unavailable.
+            clock_khz = getattr(props, "clock_rate", None)
+            if clock_khz:
+                info["clock_hz"] = int(clock_khz) * 1000
+    return info
+
+
+def _list_devices() -> list[dict]:
+    out: list[dict] = [{**_device_descriptor("cpu"), "available": True}]
+    if torch.backends.mps.is_available():
+        out.append({**_device_descriptor("mps"), "available": True})
+    if torch.cuda.is_available():
+        out.append({**_device_descriptor("cuda"), "available": True})
+    return out
+
+
 @app.get("/api/device")
 def get_device():
     return {"device": str(device)}
+
+
+@app.get("/api/device/list")
+def get_device_list():
+    s = _training_state["session"]
+    return {
+        "current": str(device),
+        "devices": _list_devices(),
+        "session_loaded": s is not None,
+        "param_count": s.param_count() if s is not None else 0,
+    }
+
+
+class DeviceSelectReq(BaseModel):
+    name: str  # 'cpu' | 'mps' | 'cuda'
+
+
+@app.post("/api/device/select")
+def post_device_select(req: DeviceSelectReq):
+    global device
+    if req.name == "mps" and not torch.backends.mps.is_available():
+        raise HTTPException(400, "MPS not available on this system")
+    if req.name == "cuda" and not torch.cuda.is_available():
+        raise HTTPException(400, "CUDA not available on this system")
+    if req.name not in ("cpu", "mps", "cuda"):
+        raise HTTPException(400, f"unknown device: {req.name!r}")
+    new_device = torch.device(req.name)
+    if str(new_device) != str(device):
+        device = new_device
+        # Move any live session to the new device. Optimizer state has
+        # tensors of its own (Adam moments, etc.) that aren't covered by
+        # model.to() — walk and move them by hand.
+        s = _training_state["session"]
+        if s is not None:
+            s.model.to(device)
+            for st in s.optimizer.state.values():
+                for k, v in st.items():
+                    if isinstance(v, torch.Tensor):
+                        st[k] = v.to(device)
+            s.device = device
+    return {"current": str(device)}
 
 
 @app.get("/api/synthesis/symbols")
@@ -156,6 +288,11 @@ def post_inference_render(req: InferenceReq):
             for k, i in enumerate(valid_idx):
                 pred_by_idx[i] = all_probs[k]
 
+    # K matches the on-screen capacity of the per-glyph detail panel —
+    # 5 alternatives is enough to show the confusables (top-1 + a few
+    # near-tie classes) without flooding the UI.
+    TOP_K = 5
+
     items: list[dict] = []
     for i, ch in enumerate(req.chars):
         png, font = input_renders[i]
@@ -170,17 +307,33 @@ def post_inference_render(req: InferenceReq):
             "in_class_set": (s is not None) and (ch in s.label_to_index)
             if s is not None
             else False,
+            "top_k": [],
         }
         if i in pred_by_idx:
             probs = pred_by_idx[i]
-            best_idx = max(range(len(probs)), key=lambda k: probs[k])
             assert s is not None
-            predicted_char = s.classes[best_idx]
-            item["predicted_char"] = predicted_char
-            item["confidence"] = probs[best_idx]
-            pred_png, pred_font = render_one(predicted_char)
-            item["predicted_png_b64"] = pred_png
-            item["predicted_font"] = pred_font
+            # Get top-K (idx, prob) pairs, descending by prob.
+            ranked = sorted(
+                enumerate(probs), key=lambda x: -x[1]
+            )[:TOP_K]
+            top_k = []
+            for idx, prob in ranked:
+                cls = s.classes[idx]
+                cls_png, cls_font = render_one(cls)
+                top_k.append(
+                    {
+                        "char": cls,
+                        "png_b64": cls_png,
+                        "font": cls_font,
+                        "confidence": float(prob),
+                    }
+                )
+            item["top_k"] = top_k
+            # Top-1 convenience fields, kept for the existing grid UI.
+            item["predicted_char"] = top_k[0]["char"]
+            item["predicted_png_b64"] = top_k[0]["png_b64"]
+            item["predicted_font"] = top_k[0]["font"]
+            item["confidence"] = top_k[0]["confidence"]
         items.append(item)
     return {"items": items, "has_session": s is not None}
 
@@ -286,10 +439,33 @@ def get_training_state():
     return _session_summary(s)
 
 
+@app.post("/api/training/reset")
+def post_training_reset():
+    """Drop the live session. Called by the frontend whenever the data
+    synthesis config changes — the model's class set is tied to that
+    config, so the previous session would be invalid against any new
+    batch."""
+    _training_state["session"] = None
+    return {"has_session": False}
+
+
 @app.post("/api/training/predict")
 def post_predict(req: PredictReq):
     s = _require_session()
     return {"predictions": s.predict(req.images)}
+
+
+@app.post("/api/training/eval")
+def post_eval(req: TrainBatchReq):
+    """Forward-only loss + accuracy on a held-out batch. Same payload
+    shape as train_batch (minus optional hyperparam fields, which are
+    ignored here) so the frontend can reuse the encoding path."""
+    s = _require_session()
+    try:
+        result = s.eval_batch(req.images, req.labels)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return result
 
 
 @app.post("/api/training/train_batch")

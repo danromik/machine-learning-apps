@@ -11,6 +11,7 @@
   import BatchGrid from './training/BatchGrid.svelte';
   import PredictionBar from './training/PredictionBar.svelte';
   import BatchChart from './training/BatchChart.svelte';
+  import LossChart from './training/LossChart.svelte';
 
   let busy = $state(false);
   let statusMsg = $state<string>('idle');
@@ -69,7 +70,12 @@
   // ── lifecycle ───────────────────────────────────────────────────────────
 
   onMount(async () => {
-    // Fetch initial state + checkpoint list
+    // Fetch initial state + checkpoint list. Batch loading is handled
+    // by the $effect below — onMount used to call loadBatch() too, but
+    // that caused a fresh batch to stream every time the user came back
+    // to the Training tab even though the existing batch was still
+    // valid. Now the effect only fetches when the config actually
+    // changed (or the global batch is empty).
     try {
       const [state, ckpts] = await Promise.all([
         api.trainingState(),
@@ -84,20 +90,41 @@
       } else {
         training.hasSession = false;
       }
-      // Load the initial batch immediately so the user always sees something.
-      await loadBatch();
     } catch (e) {
       statusMsg = `init failed: ${(e as Error).message}`;
     }
   });
 
-  // Reload when batch_size changes or synthesis becomes available.
-  // We deliberately don't read `busy` here: the AbortController inside
-  // loadBatch serializes overlapping loads, and trainOneBatch loads its
-  // own follow-up batch — so a busy-driven re-run is just redundant work.
+  // Decide whether to (re)load the batch. Triggered when batch_size
+  // changes, synthesis becomes available, or any synthesis setting
+  // changes — but on the *first* run after this component mounts, we
+  // skip the load if the global batch is already populated. That means
+  // navigating away from the Training tab and coming back doesn't burn
+  // a fresh batch when the existing one is still valid; an actual
+  // config change does invalidate it via the per-instance signature
+  // diff. (See state.svelte.ts: training.batch lives in global state,
+  // so it survives unmount/remount of TrainingTab.)
+  let lastBatchConfigSig: string | null = null;
   $effect(() => {
-    void architecture.hyperparameters.batch_size;
-    void synthesis.loaded;
+    if (!synthesis.loaded) return;
+    const sig = JSON.stringify({
+      batch_size: architecture.hyperparameters.batch_size,
+      cats: synthesis.selectedCategories,
+      fonts: synthesis.fontUsage,
+      aug: synthesis.augmentation,
+    });
+    const isFirstRun = lastBatchConfigSig === null;
+    const configChanged = !isFirstRun && sig !== lastBatchConfigSig;
+    lastBatchConfigSig = sig;
+    if (isFirstRun && training.batch.length > 0) {
+      // Coming back from another tab with a still-valid batch — keep
+      // it on screen instead of regenerating.
+      if (training.hasSession && training.predictions.length === 0) {
+        void refreshPredictions();
+      }
+      return;
+    }
+    if (!isFirstRun && !configChanged) return;
     loadBatch();
   });
 
@@ -164,6 +191,58 @@
     }
   }
 
+  // ── loss curves ────────────────────────────────────────────────────────
+
+  // Cap each series so a long Train Continuously run can't grow them
+  // unbounded; the most recent N points are what's interesting anyway.
+  const MAX_LOSS_HISTORY = 2000;
+
+  function recordTrainLoss(step: number, loss: number) {
+    training.lossHistory.push({ step, loss });
+    if (training.lossHistory.length > MAX_LOSS_HISTORY) {
+      training.lossHistory = training.lossHistory.slice(-MAX_LOSS_HISTORY);
+    }
+  }
+
+  // Run validation every Nth step using the held-out fonts. Skips
+  // silently when no val fonts are configured (so curve just doesn't
+  // populate) or when val labels fall outside the session's class set
+  // (e.g., user changed categories without reinit).
+  async function maybeRunValidation(step: number) {
+    if (!training.hasSession) return;
+    if (training.validateEveryN <= 0 || step <= 0) return;
+    if (step % training.validateEveryN !== 0) return;
+    const valFonts = synthesis.fonts.filter(
+      (f) => synthesis.fontUsage[f.family] === 'val'
+    );
+    if (valFonts.length === 0) return;
+    const cfg = {
+      ...buildSampleRequest(architecture.hyperparameters.batch_size),
+      split: 'val' as const,
+    };
+    try {
+      const samples: SynthesisSample[] = [];
+      for await (const s of streamSamples(cfg)) {
+        samples.push(s);
+      }
+      if (samples.length === 0) return;
+      const r = await api.evalBatch(
+        samples.map((s) => s.png_b64),
+        samples.map((s) => s.label)
+      );
+      training.valLossHistory.push({ step, loss: r.loss });
+      if (training.valLossHistory.length > MAX_LOSS_HISTORY) {
+        training.valLossHistory = training.valLossHistory.slice(
+          -MAX_LOSS_HISTORY
+        );
+      }
+    } catch (e) {
+      // Don't surface val errors to the status footer — they shouldn't
+      // disrupt training. Just drop this point and move on.
+      console.warn('val skipped:', e);
+    }
+  }
+
   // ── actions ────────────────────────────────────────────────────────────
 
   async function reinitialize() {
@@ -197,6 +276,8 @@
       training.lastLoss = null;
       training.lastAccuracy = null;
       training.batchChartCounts = { correct: 0, incorrect: 0, total: 0 };
+      training.lossHistory = [];
+      training.valLossHistory = [];
       statusMsg = `model initialized · ${result.param_count.toLocaleString()} params · ${result.num_classes} classes`;
       await refreshPredictions();
     } catch (e) {
@@ -247,6 +328,8 @@
       training.lastLoss = result.loss;
       training.lastAccuracy = result.accuracy;
       training.step = result.step;
+      recordTrainLoss(result.step, result.loss);
+      await maybeRunValidation(result.step);
       statusMsg =
         `step ${result.step} · loss ${result.loss.toFixed(4)} ` +
         `· acc ${(result.accuracy * 100).toFixed(1)}%`;
@@ -278,7 +361,7 @@
     try {
       for (let i = 0; i < total; i++) {
         if (abortEpoch) {
-          statusMsg = `epoch interrupted at ${i}/${total} · step ${training.step}`;
+          statusMsg = `training epoch interrupted (batch ${i}/${total}) · step ${training.step}`;
           return;
         }
         if (training.batch.length === 0) {
@@ -294,8 +377,10 @@
         training.lastLoss = result.loss;
         training.lastAccuracy = result.accuracy;
         training.step = result.step;
+        recordTrainLoss(result.step, result.loss);
+        await maybeRunValidation(result.step);
         statusMsg =
-          `epoch ${i + 1}/${total} · step ${result.step} ` +
+          `training epoch (batch ${i + 1}/${total}) · step ${result.step} ` +
           `· loss ${result.loss.toFixed(4)} ` +
           `· acc ${(result.accuracy * 100).toFixed(1)}%`;
         // Update the persistent batch chart with this step's verdicts
@@ -342,6 +427,8 @@
       training.lastLoss = result.loss;
       training.lastAccuracy = result.accuracy;
       training.step = result.step;
+      recordTrainLoss(result.step, result.loss);
+      await maybeRunValidation(result.step);
       statusMsg =
         `step ${result.step} · loss ${result.loss.toFixed(4)} ` +
         `· acc ${(result.accuracy * 100).toFixed(1)}%`;
@@ -385,6 +472,8 @@
         training.lastLoss = result.loss;
         training.lastAccuracy = result.accuracy;
         training.step = result.step;
+        recordTrainLoss(result.step, result.loss);
+        await maybeRunValidation(result.step);
         const epochsDone =
           batchesPerEpoch > 0
             ? Math.floor(result.step / batchesPerEpoch)
@@ -444,6 +533,8 @@
       training.lastLoss = null;
       training.lastAccuracy = null;
       training.batchChartCounts = { correct: 0, incorrect: 0, total: 0 };
+      training.lossHistory = [];
+      training.valLossHistory = [];
       statusMsg = `loaded ${training.checkpointFilename} · step ${result.step}`;
       await refreshPredictions();
     } catch (e) {
@@ -570,6 +661,7 @@
     <div class="w-px shrink-0 bg-[var(--color-border)]"></div>
 
     <div class="w-96 shrink-0 min-h-0 flex flex-col">
+      <!-- Prediction section: per-sample probs + per-batch correctness -->
       <header
         class="flex items-baseline justify-between gap-3 px-3 py-1.5
                border-b border-[var(--color-border)]"
@@ -577,6 +669,9 @@
         <h4 class="text-xs font-semibold text-[var(--color-heading)]">
           Prediction
         </h4>
+        <span class="text-[10px] text-[var(--color-muted)] font-mono">
+          per-sample · per-batch
+        </span>
       </header>
       <div class="flex-1 min-h-0 flex">
         <PredictionBar classes={selectedClasses} />
@@ -584,6 +679,35 @@
         <div class="w-24 shrink-0 min-h-0 flex flex-col">
           <BatchChart />
         </div>
+      </div>
+
+      <!-- Loss section: line charts of training and validation loss
+           over training steps. Validation runs every Nth step against
+           a freshly-rendered held-out batch (skipped silently if no
+           val fonts are configured). -->
+      <header
+        class="flex items-baseline justify-between gap-3 px-3 py-1.5
+               border-y border-[var(--color-border)]"
+      >
+        <h4 class="text-xs font-semibold text-[var(--color-heading)]">
+          Loss
+        </h4>
+        <span class="text-[10px] text-[var(--color-muted)] font-mono">
+          validation every {training.validateEveryN} batches
+        </span>
+      </header>
+      <div class="flex-1 min-h-0 flex">
+        <LossChart
+          data={training.lossHistory}
+          color="var(--color-accent)"
+          label="Training"
+        />
+        <div class="w-px shrink-0 bg-[var(--color-border)]"></div>
+        <LossChart
+          data={training.valLossHistory}
+          color="var(--color-success)"
+          label="Validation"
+        />
       </div>
     </div>
   </div>

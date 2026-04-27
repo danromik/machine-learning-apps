@@ -22,16 +22,24 @@
           : verdict === 'incorrect'
           ? 'var(--color-danger)'
           : null}
+        <!-- The accent (blue) ring is reserved for the Train 1 Batch
+             (Fun) sweep — it marks the sample currently being narrated.
+             Clicks (or post-Fun selections) use the verdict color so the
+             ring carries the same correctness signal as the cell border;
+             we only fall back to accent if there's no verdict yet. -->
+        {@const selectionColor = selected && training.animating
+          ? 'var(--color-accent)'
+          : verdictColor ?? 'var(--color-accent)'}
         <button
           type="button"
           class="relative aspect-square block p-0 rounded outline-none"
           style="
             border: 2px solid {selected
-              ? 'var(--color-accent)'
+              ? selectionColor
               : verdictColor ?? 'var(--color-border)'};
             background: var(--color-surface);
             box-shadow: {selected
-              ? '0 0 0 3px var(--color-accent), 0 6px 12px rgba(0,0,0,0.18)'
+              ? `0 0 0 3px ${selectionColor}, 0 6px 12px rgba(0,0,0,0.18)`
               : verdictColor
               ? `0 0 0 1px ${verdictColor}`
               : 'none'};

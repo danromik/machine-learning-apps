@@ -161,6 +161,29 @@ class TrainingSession:
         probs = F.softmax(self.model(x), dim=1)
         return probs.cpu().tolist()
 
+    @torch.no_grad()
+    def eval_batch(
+        self, images: list[str], labels: list[str]
+    ) -> dict[str, Any]:
+        """Forward-only loss + top-1 accuracy on a held-out batch. No
+        optimizer step. Used by the validation chart."""
+        if len(images) != len(labels):
+            raise ValueError("images and labels must have the same length")
+        if not images:
+            raise ValueError("empty batch")
+        try:
+            indices = [self.label_to_index[lab] for lab in labels]
+        except KeyError as e:
+            raise ValueError(f"label {e!r} not in this session's class list")
+        self.model.eval()
+        x = _decode_batch(images, self.device)
+        y = torch.tensor(indices, dtype=torch.long, device=self.device)
+        logits = self.model(x)
+        loss = F.cross_entropy(logits, y)
+        preds = logits.argmax(dim=1)
+        accuracy = float((preds == y).float().mean().item())
+        return {"loss": float(loss.item()), "accuracy": accuracy}
+
     def set_lr(self, lr: float) -> None:
         """Hot-swap the optimizer's learning rate without rebuilding it.
 
