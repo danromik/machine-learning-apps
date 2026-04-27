@@ -29,21 +29,32 @@
     return idx >= 0 ? idx : null;
   });
 
+  // Track the chart container's pixel width so we can size bars to fit
+  // exactly — no horizontal scroll, no preserveAspectRatio="none" text
+  // distortion. svelte-bound clientWidth uses ResizeObserver under the
+  // hood and updates reactively.
+  let containerWidth = $state(0);
+
   let n = $derived(classes.length);
-  // Width per bar in the SVG. We use a fixed-width SVG that scales via
-  // viewBox; this keeps the bar metrics simple.
-  const BAR_W = 8;
   const GAP = 1;
   const HEADER_H = 14;
   const FOOTER_H = 14;
   const PLOT_H = 120;
-  let svgW = $derived(n * (BAR_W + GAP) + GAP);
   const svgH = HEADER_H + PLOT_H + FOOTER_H;
+
+  // SVG width tracks the container (1:1, so coordinates equal pixels).
+  // Bar width is whatever's left after subtracting the inter-bar gaps —
+  // can go subpixel for very large class counts; the browser handles AA.
+  let svgW = $derived(Math.max(1, containerWidth));
+  let BAR_W = $derived.by(() => {
+    if (n <= 0 || svgW <= 0) return 0;
+    return Math.max(0.5, (svgW - GAP) / n - GAP);
+  });
 </script>
 
 <div class="flex-1 min-w-0 min-h-0 flex flex-col p-3 gap-2">
   <header class="flex items-baseline justify-between text-xs">
-    <span class="font-semibold text-[var(--color-heading)]">Prediction</span>
+    <span class="font-semibold text-[var(--color-heading)]">Single training sample</span>
     {#if probs !== null && predictedIdx !== null && actualIdx !== null}
       <span class="text-[var(--color-muted)] font-mono">
         actual <span class="text-[var(--color-text)]">{classes[actualIdx]}</span>
@@ -63,11 +74,10 @@
     {/if}
   </header>
 
-  <div class="flex-1 min-h-0 overflow-auto">
+  <div bind:clientWidth={containerWidth} class="flex-1 min-h-0 min-w-0">
     <svg
       width={svgW}
       height={svgH}
-      viewBox={`0 0 ${svgW} ${svgH}`}
       class="block"
       role="img"
       aria-label="Class probability distribution"

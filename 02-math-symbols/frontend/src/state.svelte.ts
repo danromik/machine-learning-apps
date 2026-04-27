@@ -120,8 +120,29 @@ export const training = $state({
   selectedIndex: null as number | null,
   // True while Train (1 Batch) is animating through images.
   animating: false,
-  // Last train_batch loss, for display.
+  // Per-batch-item verdict from the Train 1 Batch (Fun) sweep — null until
+  // the animation reaches that index, then 'correct' or 'incorrect' for
+  // the rest of the batch's lifetime. Cleared when a new batch loads so
+  // the user gets a fresh canvas.
+  batchVerdict: [] as ('correct' | 'incorrect' | null)[],
+  // Persistent counts powering the BatchChart. Survives loadBatch so the
+  // last training run's tally stays on screen until another run replaces
+  // it. `total` is the batch size at snapshot time so bars scale right
+  // even after batch_size changes between runs.
+  batchChartCounts: { correct: 0, incorrect: 0, total: 0 } as {
+    correct: number;
+    incorrect: number;
+    total: number;
+  },
+  // Last train_batch loss + top-1 accuracy on that batch, for display.
   lastLoss: null as number | null,
+  lastAccuracy: null as number | null,
+
+  // An "epoch" here is a number of batches that, on average, exposes each
+  // symbol in the target set to N training examples — N is configurable
+  // because there's no canonical right value with synthesized data
+  // (any number of batches is "valid"; this just sets a meaningful unit).
+  samplesPerSymbolPerEpoch: 50,
 
   // Checkpoint filename text field (sticky across navigations).
   checkpointFilename: 'model.pt',

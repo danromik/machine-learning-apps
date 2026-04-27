@@ -55,7 +55,7 @@ export type SessionState =
       optimizer: string;
     };
 
-export type TrainBatchResult = { loss: number; step: number };
+export type TrainBatchResult = { loss: number; step: number; accuracy: number };
 
 export const api = {
   device: () => j<{ device: string }>(fetch('/api/device')),
@@ -87,12 +87,17 @@ export const api = {
         body: JSON.stringify({ images }),
       })
     ),
-  trainBatch: (images: string[], labels: string[]) =>
+  trainBatch: (
+    images: string[],
+    labels: string[],
+    lr?: number,
+    optimizer?: string
+  ) =>
     j<TrainBatchResult>(
       fetch('/api/training/train_batch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ images, labels }),
+        body: JSON.stringify({ images, labels, lr, optimizer }),
       })
     ),
   listCheckpoints: () =>
@@ -113,6 +118,33 @@ export const api = {
         body: JSON.stringify({ filename }),
       })
     ),
+
+  // Inference: rendering + prediction in one call. `chars` is the
+  // sequence of glyphs to classify. Each item comes back with both the
+  // input PNG (what the model sees) and, when a session is loaded, the
+  // model's top prediction re-rendered the same way.
+  inferenceRender: (chars: string[], fonts?: string[]) =>
+    j<{
+      items: InferenceItem[];
+      has_session: boolean;
+    }>(
+      fetch('/api/inference/render', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chars, fonts }),
+      })
+    ),
+};
+
+export type InferenceItem = {
+  char: string;
+  input_png_b64: string | null;
+  input_font: string | null;
+  predicted_char: string | null;
+  predicted_png_b64: string | null;
+  predicted_font: string | null;
+  confidence: number | null;
+  in_class_set: boolean;
 };
 
 export type SynthesisSample = {

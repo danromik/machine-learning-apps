@@ -99,6 +99,92 @@ class SampleReq(BaseModel):
     seed: int = 42
 
 
+class InferenceReq(BaseModel):
+    chars: list[str]
+    # Optional preferred font; falls back through `fonts` and finally to
+    # any installed curated font that supports the glyph.
+    font: str | None = None
+    fonts: list[str] | None = None
+
+
+@app.post("/api/inference/render")
+def post_inference_render(req: InferenceReq):
+    """Render each input char to a 64×64 grayscale PNG through the
+    training pipeline and (if a training session is loaded) classify it,
+    re-rendering the predicted class so the frontend can show side-by-
+    side glyph grids of input vs prediction without extra round-trips.
+    """
+    import base64
+    import io
+
+    candidates: list[str] = []
+    if req.font:
+        candidates.append(req.font)
+    if req.fonts:
+        candidates.extend(f for f in req.fonts if f != req.font)
+    # Final fallback: any installed curated font, in priority order.
+    candidates.extend(
+        f["family"]
+        for f in _ml.list_curated_fonts()
+        if f["installed"] and f["family"] not in candidates
+    )
+
+    def render_one(ch: str) -> tuple[str | None, str | None]:
+        if not ch:
+            return None, None
+        for family in candidates:
+            path = _ml.font_path(family)
+            if path is None or not _synthesis._has_glyph(ch, path):
+                continue
+            img = _synthesis.render_glyph(ch, path)
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            return base64.b64encode(buf.getvalue()).decode("ascii"), family
+        return None, None
+
+    # Render inputs.
+    input_renders = [render_one(ch) for ch in req.chars]
+
+    # Batch-predict the renders that exist (skip empty/unsupported chars).
+    s = _training_state["session"]
+    pred_by_idx: dict[int, list[float]] = {}
+    if s is not None:
+        valid_idx = [i for i, (png, _) in enumerate(input_renders) if png]
+        if valid_idx:
+            pngs = [input_renders[i][0] for i in valid_idx]  # type: ignore
+            all_probs = s.predict(pngs)
+            for k, i in enumerate(valid_idx):
+                pred_by_idx[i] = all_probs[k]
+
+    items: list[dict] = []
+    for i, ch in enumerate(req.chars):
+        png, font = input_renders[i]
+        item: dict = {
+            "char": ch,
+            "input_png_b64": png,
+            "input_font": font,
+            "predicted_char": None,
+            "predicted_png_b64": None,
+            "predicted_font": None,
+            "confidence": None,
+            "in_class_set": (s is not None) and (ch in s.label_to_index)
+            if s is not None
+            else False,
+        }
+        if i in pred_by_idx:
+            probs = pred_by_idx[i]
+            best_idx = max(range(len(probs)), key=lambda k: probs[k])
+            assert s is not None
+            predicted_char = s.classes[best_idx]
+            item["predicted_char"] = predicted_char
+            item["confidence"] = probs[best_idx]
+            pred_png, pred_font = render_one(predicted_char)
+            item["predicted_png_b64"] = pred_png
+            item["predicted_font"] = pred_font
+        items.append(item)
+    return {"items": items, "has_session": s is not None}
+
+
 @app.post("/api/synthesis/sample")
 def post_sample(req: SampleReq):
     if req.split not in ("train", "val"):
@@ -142,6 +228,11 @@ class PredictReq(BaseModel):
 class TrainBatchReq(BaseModel):
     images: list[str]
     labels: list[str]
+    # Optional hot-swap hyperparameters. When present, the session updates
+    # its optimizer (rebuilds on optimizer name change, in-place lr swap
+    # otherwise) before the gradient step.
+    lr: float | None = None
+    optimizer: str | None = None
 
 
 class CheckpointReq(BaseModel):
@@ -205,7 +296,9 @@ def post_predict(req: PredictReq):
 def post_train_batch(req: TrainBatchReq):
     s = _require_session()
     try:
-        result = s.train_batch(req.images, req.labels)
+        result = s.train_batch(
+            req.images, req.labels, lr=req.lr, optimizer_name=req.optimizer
+        )
     except ValueError as e:
         raise HTTPException(400, str(e))
     return result

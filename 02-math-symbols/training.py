@@ -161,12 +161,49 @@ class TrainingSession:
         probs = F.softmax(self.model(x), dim=1)
         return probs.cpu().tolist()
 
-    def train_batch(self, images: list[str], labels: list[str]) -> dict[str, Any]:
-        """One forward + backward + optimizer step. Returns the loss."""
+    def set_lr(self, lr: float) -> None:
+        """Hot-swap the optimizer's learning rate without rebuilding it.
+
+        Optimizer state (Adam moments, SGD momentum) is preserved — only
+        the lr field on each param_group is rewritten.
+        """
+        lr = float(lr)
+        for pg in self.optimizer.param_groups:
+            pg["lr"] = lr
+        self.lr = lr
+
+    def train_batch(
+        self,
+        images: list[str],
+        labels: list[str],
+        lr: float | None = None,
+        optimizer_name: str | None = None,
+    ) -> dict[str, Any]:
+        """One forward + backward + optimizer step. Returns the loss.
+
+        If `lr` and/or `optimizer_name` differ from the current values,
+        hot-swap them before stepping — that's the path the UI controls
+        take, so changes take effect on the next batch without requiring
+        a Re-Initialize. Switching optimizer rebuilds it (loses Adam
+        moments / SGD momentum, which is the only honest behavior when
+        the user picks a fundamentally different update rule).
+        """
         if len(images) != len(labels):
             raise ValueError("images and labels must have the same length")
         if not images:
             raise ValueError("empty batch")
+
+        # Optimizer change first so a combined (lr + optimizer) update
+        # constructs the new optimizer at the requested lr in one shot.
+        if optimizer_name is not None and optimizer_name != self.optimizer_name:
+            new_lr = float(lr) if lr is not None else self.lr
+            self.optimizer = make_optimizer(
+                optimizer_name, self.model.parameters(), new_lr
+            )
+            self.optimizer_name = optimizer_name
+            self.lr = new_lr
+        elif lr is not None and float(lr) != self.lr:
+            self.set_lr(lr)
         try:
             indices = [self.label_to_index[lab] for lab in labels]
         except KeyError as e:
@@ -178,11 +215,17 @@ class TrainingSession:
         logits = self.model(x)
         loss = F.cross_entropy(logits, y)
 
+        # Top-1 training accuracy on this batch — measured before the step
+        # so it reflects the model the user just saw predict.
+        with torch.no_grad():
+            preds = logits.argmax(dim=1)
+            accuracy = float((preds == y).float().mean().item())
+
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
         self.step += 1
-        return {"loss": float(loss.item()), "step": self.step}
+        return {"loss": float(loss.item()), "step": self.step, "accuracy": accuracy}
 
     # ── meta ──────────────────────────────────────────────────────────
 
@@ -198,11 +241,18 @@ def save_checkpoint(session: TrainingSession, filename: str) -> str:
     if not filename.endswith(".pt"):
         filename = filename + ".pt"
     path = CKPT_DIR / filename
+    # Pull from the live session attrs rather than session.hyperparameters
+    # so hot-swapped values (lr, optimizer) get persisted correctly. The
+    # original dict is set at init time and never updated.
     torch.save(
         {
             "state_dict": session.model.state_dict(),
             "layers": session.layers,
-            "hyperparameters": session.hyperparameters,
+            "hyperparameters": {
+                "lr": session.lr,
+                "batch_size": session.batch_size,
+                "optimizer": session.optimizer_name,
+            },
             "classes": session.classes,
             "step": session.step,
         },

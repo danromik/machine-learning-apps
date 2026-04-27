@@ -16,20 +16,28 @@
     >
       {#each training.batch as sample, i (i)}
         {@const selected = training.selectedIndex === i}
+        {@const verdict = training.batchVerdict[i] ?? null}
+        {@const verdictColor = verdict === 'correct'
+          ? 'var(--color-success)'
+          : verdict === 'incorrect'
+          ? 'var(--color-danger)'
+          : null}
         <button
           type="button"
           class="relative aspect-square block p-0 rounded outline-none"
           style="
             border: 2px solid {selected
               ? 'var(--color-accent)'
-              : 'var(--color-border)'};
+              : verdictColor ?? 'var(--color-border)'};
             background: var(--color-surface);
             box-shadow: {selected
               ? '0 0 0 3px var(--color-accent), 0 6px 12px rgba(0,0,0,0.18)'
+              : verdictColor
+              ? `0 0 0 1px ${verdictColor}`
               : 'none'};
             transform: {selected ? 'scale(1.18)' : 'scale(1)'};
             z-index: {selected ? '10' : '0'};
-            transition: transform 60ms ease-out, box-shadow 60ms;
+            transition: transform 60ms ease-out, box-shadow 60ms, border-color 120ms;
           "
           onclick={() => onSelect(i)}
           title={sample.font + (sample.missing_glyph ? ' (missing glyph)' : '')}

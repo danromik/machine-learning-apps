@@ -2,6 +2,8 @@
 
 A suite of interactive apps for learning and experimenting with machine learning concepts, each one a self-contained project that trains a real network end-to-end. The goal is pedagogical: each app should make a specific ML idea visible and manipulable (live loss curves, freehand inference, hyperparameter sliders, data inspection), and the sequence of projects should progress from simple MLPs to models that push the limits of the local hardware.
 
+**Source:** https://github.com/danromik/machine-learning-apps (origin/main).
+
 ## Hardware & stack
 
 - Apple Silicon Mac, PyTorch on the **MPS** backend (`torch.device("mps")`); CUDA/CPU paths kept as fallbacks.
@@ -51,6 +53,8 @@ NN-name/
 
 ## Backend conventions
 
+These describe `01-mnist-trainer`'s pattern. `02-math-symbols` deviates — see its section below.
+
 - **Threaded training worker** (`training_worker.py`) with a `queue.Queue` of event dicts (`reset`, `log`, `start`, `step`, `epoch`, `checkpoint`, `paused`, `stopped`, `done`, `error`). The FastAPI WebSocket endpoint drains the queue and pushes events as JSON. Training never blocks the HTTP server.
 - **Persistent training session** between button clicks so "single batch", "single epoch", and "continuous" all advance the same model. Session auto-rebuilds when incompatible config changes (model type, batch size); LR is hot-swappable. `start_run` accepts `max_steps` and `max_epochs` caps; whichever hits first ends the run.
 - **Predict path** (`/api/predict`) prefers, in order: live training session → cached last-loaded model → first checkpoint on disk. After `reset_session(cfg)`, the cached model is cleared so prediction always uses the freshly initialized random weights.
@@ -84,18 +88,27 @@ cd 01-mnist-trainer/frontend && npm run dev    # vite on :5042, proxies to backe
 
 A printed-symbol OCR classifier covering the glyphs used in mathematical writing: alphanumerics, punctuation/ASCII, Greek upper/lower, and math symbols (several hundred classes total). Distinct from `01-mnist-trainer` in three ways:
 
-1. **Synthesized data, not downloaded.** Glyphs are rendered from system/open-source fonts on the fly during training. No fixed dataset on disk; each training step pulls a fresh batch with augmentation (noise, blur, skew, etc.). On-the-fly synthesis means infinite training data and lets augmentation be a live, tunable hyperparameter.
+1. **Synthesized data, not downloaded.** Glyphs are rendered from system/open-source fonts on the fly during training. No fixed dataset on disk; each training step pulls a fresh batch with augmentation (noise, blur, skew, etc.). On-the-fly synthesis means infinite training data and lets augmentation be a live, tunable hyperparameter. Missing-glyph `(char, font)` pairs are filtered out at sample time so the model never sees a `.notdef` placeholder mislabeled as some target symbol.
 2. **Held-out fonts for validation.** Generalization to *unseen fonts* is the bar — a fixed seeded validation set is rendered with fonts the training pipeline never sees, so val accuracy measures real generalization rather than memorization of font-class pairs.
 3. **Tabbed pedagogical UI.** Numbered tabs walk the user through the pipeline:
-   - **0 Orientation** — welcome page describing the pipeline, with a CTA into the Data Synthesis tab
-   - **1 Data Synthesis** — choose symbol categories (digits, roman, punctuation, Greek, math), training fonts, held-out validation fonts, and augmentation
-   - **2 Model Architecture** — design the network layer-by-layer (drag-and-drop) with a Suggest button that picks a CNN matched to the current data config
-   - **3 Training** — re-initialize the model, train one batch (or eventually one epoch / continuously), watch loss + a live prediction bar chart per sample, save/load checkpoints
-   - **4 Inference** — type text and watch the trained model classify each glyph in real time
+   - **0 Orientation** — welcome page describing the pipeline, with a CTA into the Data Synthesis tab.
+   - **1 Data Synthesis** — choose symbol categories (digits, roman, punctuation, Greek, math), training fonts, held-out validation fonts, and augmentation. Includes a Preview Data modal that streams sample images for both splits.
+   - **2 Model Architecture** — design the network layer-by-layer (drag-and-drop) with a Suggest button that picks a CNN matched to the current data config.
+   - **3 Training** — Re-Initialize Model (capsule CTA, distinct from train buttons), Train 1 Batch (Fun) which sweeps a per-image highlight + per-class softmax bars + green/red verdict frames over the batch, Train 1 Batch (Fast) which skips the animation, Train 1 Epoch (one epoch = enough batches for each symbol to be seen on average `samples_per_symbol_per_epoch` times — user-tunable), Train Continuously (with Stop). Right pane has the per-sample probability chart + a persistent Batch chart of green/red counts that survives across batch reloads. Hyperparameters (LR, optimizer) are hot-swappable: the slider value is sent with every train_batch request and the backend updates the optimizer in place.
+   - **4 Inference** — textarea takes plain text with `$…$` math delimiters, KaTeX renders the preview inline. Glyphs are extracted by walking the rendered DOM (so `\alpha` correctly expands to `α`), then a single combined `/api/inference/render` call runs each through the synthesis pipeline + the live model, returning input + predicted PNGs and confidences. Side-by-side input vs predicted glyph grids, plus a reconstructed predicted-text string. Manual "Run Inference" button — not auto-debounced.
 
-**Build order.** Built incrementally tab by tab, so the standard project shape (`models.py`, `ml.py`, `training_worker.py`, `train.py`) gets filled in as each stage comes online. The scaffold starts with just `server.py` + `frontend/` and adds the rest as needed.
+### Backend specifics (differs from MNIST)
+
+- **No worker thread, no WebSocket.** All training endpoints are synchronous REST: `POST /api/training/train_batch` runs one gradient step and returns. Sequencing batches into "1 epoch" or "continuously" happens client-side (a JS loop in `TrainingTab.svelte` that calls train_batch + loadBatch repeatedly, with a `Stop` flag to abort).
+- **Files.** `ml.py` (symbol catalog + curated font list + presets), `synthesis.py` (glyph rendering + augmentation), `training.py` (TrainingSession + checkpoint I/O), `server.py` (FastAPI). No `training_worker.py`, no `train.py` CLI yet.
+- **Hot-swap hyperparameters via train_batch kwargs.** `lr` and `optimizer_name` can be passed with each train_batch request; the session updates the optimizer in place (rebuilds on optimizer-name change, preserves Adam state on lr-only change). `save_checkpoint` reads from live session attrs, not the stale init-time `hyperparameters` dict.
+- **Tab status subtitles** in `App.svelte` reactively show `X symbols · Y fonts` (Data Synthesis), `X layers · Y weights` (Architecture), `X epochs · Y batches · Z% accuracy` (Training) — derived from state and updated live during training runs.
+
+**Build order.** Built incrementally tab by tab. All five tabs are now live; CLI (`train.py`) is the main remaining piece if needed for headless/scriptable runs.
 
 **Ports.** Same as MNIST: backend on `5041`, Vite dev on `5042`. Override with `MATH_SERVER_PORT`. Only one app can run at a time without overriding.
+
+**Frontend deps beyond the shared stack:** `katex` (loaded globally via `main.ts`) for the Inference tab.
 
 ## Adding a new project
 

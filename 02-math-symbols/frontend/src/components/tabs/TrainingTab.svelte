@@ -10,9 +10,32 @@
   import Sidebar from './training/Sidebar.svelte';
   import BatchGrid from './training/BatchGrid.svelte';
   import PredictionBar from './training/PredictionBar.svelte';
+  import BatchChart from './training/BatchChart.svelte';
 
   let busy = $state(false);
   let statusMsg = $state<string>('idle');
+  // True while trainOneEpoch is actively iterating. The sidebar uses this
+  // to flip the Train (1 Epoch) button into a Stop button.
+  let epochRunning = $state(false);
+  // Set true to interrupt an in-progress Train (1 Epoch) at the next batch
+  // boundary. Cleared at the start of each epoch run.
+  let abortEpoch = $state(false);
+  // Same pattern, for Train Continuously.
+  let continuousRunning = $state(false);
+  let abortContinuous = $state(false);
+
+  // Number of batches in one "epoch" — derived from the user-set
+  // samples-per-symbol target and the current batch size. Mirrors the
+  // formula used in App.svelte for the Training tab subtitle.
+  let batchesPerEpoch = $derived.by(() => {
+    const classes = training.numClasses;
+    const bs = architecture.hyperparameters.batch_size;
+    if (classes <= 0 || bs <= 0) return 0;
+    return Math.max(
+      1,
+      Math.ceil((classes * training.samplesPerSymbolPerEpoch) / bs)
+    );
+  });
   // Plain `let`, NOT $state — buildSampleRequest does `++batchSeed`, and if
   // batchSeed were reactive the read + write inside the $effect's tracked
   // call chain would invalidate the effect on every run, causing an infinite
@@ -104,6 +127,7 @@
     training.batch = samples;
     training.selectedIndex = null;
     training.predictions = [];
+    training.batchVerdict = new Array(samples.length).fill(null);
     if (training.hasSession) await refreshPredictions();
   }
 
@@ -170,6 +194,9 @@
       training.numClasses = result.num_classes;
       training.paramCount = result.param_count;
       training.step = result.step;
+      training.lastLoss = null;
+      training.lastAccuracy = null;
+      training.batchChartCounts = { correct: 0, incorrect: 0, total: 0 };
       statusMsg = `model initialized · ${result.param_count.toLocaleString()} params · ${result.num_classes} classes`;
       await refreshPredictions();
     } catch (e) {
@@ -195,18 +222,34 @@
       // takes ~6.4s, a 32-batch ~3.2s.
       const total = training.batch.length;
       const stepDelay = Math.max(50, Math.min(100, Math.floor(4000 / total)));
+      // Reset verdicts for this animation pass — they fill in as we go and
+      // persist on-screen until the next batch loads.
+      training.batchVerdict = new Array(total).fill(null);
+      // Reset the chart counts so the user sees them grow from zero
+      // alongside the per-image sweep.
+      training.batchChartCounts = { correct: 0, incorrect: 0, total };
       for (let i = 0; i < total; i++) {
         training.selectedIndex = i;
         await sleep(stepDelay);
+        recordVerdict(i);
+        if (training.batchVerdict[i] === 'correct')
+          training.batchChartCounts.correct++;
+        else if (training.batchVerdict[i] === 'incorrect')
+          training.batchChartCounts.incorrect++;
       }
       // Apply the actual gradient step on the same batch.
       const result = await api.trainBatch(
         training.batch.map((b) => b.png_b64),
-        training.batch.map((b) => b.label)
+        training.batch.map((b) => b.label),
+        architecture.hyperparameters.lr,
+        architecture.hyperparameters.optimizer
       );
       training.lastLoss = result.loss;
+      training.lastAccuracy = result.accuracy;
       training.step = result.step;
-      statusMsg = `step ${result.step} · loss ${result.loss.toFixed(4)}`;
+      statusMsg =
+        `step ${result.step} · loss ${result.loss.toFixed(4)} ` +
+        `· acc ${(result.accuracy * 100).toFixed(1)}%`;
       // Load a new batch + new predictions for the next round.
       await loadBatch();
     } catch (e) {
@@ -215,6 +258,164 @@
       training.animating = false;
       busy = false;
     }
+  }
+
+  // Train for one epoch == batchesPerEpoch sequential train_batch calls,
+  // each on a fresh batch. Skips the per-image animation that
+  // trainOneBatch does — at this scale (often 30+ batches) the animation
+  // would take minutes. Status message + tab subtitle update live.
+  async function trainOneEpoch() {
+    if (!training.hasSession || batchesPerEpoch <= 0) return;
+    if (training.batch.length === 0) {
+      statusMsg = 'no batch loaded — check Data Synthesis';
+      return;
+    }
+    busy = true;
+    epochRunning = true;
+    abortEpoch = false;
+    const total = batchesPerEpoch;
+    statusMsg = `training (1 epoch = ${total} batches)…`;
+    try {
+      for (let i = 0; i < total; i++) {
+        if (abortEpoch) {
+          statusMsg = `epoch interrupted at ${i}/${total} · step ${training.step}`;
+          return;
+        }
+        if (training.batch.length === 0) {
+          statusMsg = `epoch stopped: failed to load batch ${i + 1}/${total}`;
+          return;
+        }
+        const result = await api.trainBatch(
+          training.batch.map((b) => b.png_b64),
+          training.batch.map((b) => b.label),
+          architecture.hyperparameters.lr,
+          architecture.hyperparameters.optimizer
+        );
+        training.lastLoss = result.loss;
+        training.lastAccuracy = result.accuracy;
+        training.step = result.step;
+        statusMsg =
+          `epoch ${i + 1}/${total} · step ${result.step} ` +
+          `· loss ${result.loss.toFixed(4)} ` +
+          `· acc ${(result.accuracy * 100).toFixed(1)}%`;
+        // Update the persistent batch chart with this step's verdicts
+        // before the next loadBatch wipes the predictions.
+        snapshotBatchChartCounts();
+        // Stream a new batch for the next iteration (and to refresh the
+        // grid when the user is watching).
+        await loadBatch();
+      }
+      statusMsg =
+        `epoch complete · step ${training.step} ` +
+        (training.lastLoss !== null
+          ? `· loss ${training.lastLoss.toFixed(4)} `
+          : '') +
+        (training.lastAccuracy !== null
+          ? `· acc ${(training.lastAccuracy * 100).toFixed(1)}%`
+          : '');
+    } catch (e) {
+      statusMsg = `epoch train failed: ${(e as Error).message}`;
+    } finally {
+      abortEpoch = false;
+      epochRunning = false;
+      busy = false;
+    }
+  }
+
+  function stopEpoch() {
+    abortEpoch = true;
+  }
+
+  // Same gradient step as trainOneBatch but without the per-image
+  // highlight + prediction sweep — just train, update status, advance.
+  async function trainOneBatchFast() {
+    if (training.batch.length === 0 || !training.hasSession) return;
+    busy = true;
+    statusMsg = 'training (1 batch)…';
+    try {
+      const result = await api.trainBatch(
+        training.batch.map((b) => b.png_b64),
+        training.batch.map((b) => b.label),
+        architecture.hyperparameters.lr,
+        architecture.hyperparameters.optimizer
+      );
+      training.lastLoss = result.loss;
+      training.lastAccuracy = result.accuracy;
+      training.step = result.step;
+      statusMsg =
+        `step ${result.step} · loss ${result.loss.toFixed(4)} ` +
+        `· acc ${(result.accuracy * 100).toFixed(1)}%`;
+      // Snapshot pre-step prediction counts BEFORE loadBatch swaps the
+      // predictions array out from under us.
+      snapshotBatchChartCounts();
+      await loadBatch();
+    } catch (e) {
+      statusMsg = `train failed: ${(e as Error).message}`;
+    } finally {
+      busy = false;
+    }
+  }
+
+  // Open-ended training loop — keeps calling train_batch until the user
+  // hits Stop. Same shape as trainOneEpoch but without the batch cap;
+  // status reports running totals (step + derived epoch count) instead of
+  // progress within an epoch.
+  async function trainContinuously() {
+    if (!training.hasSession) return;
+    if (training.batch.length === 0) {
+      statusMsg = 'no batch loaded — check Data Synthesis';
+      return;
+    }
+    busy = true;
+    continuousRunning = true;
+    abortContinuous = false;
+    statusMsg = 'training continuously…';
+    try {
+      while (!abortContinuous) {
+        if (training.batch.length === 0) {
+          statusMsg = 'continuous stopped: failed to load batch';
+          return;
+        }
+        const result = await api.trainBatch(
+          training.batch.map((b) => b.png_b64),
+          training.batch.map((b) => b.label),
+          architecture.hyperparameters.lr,
+          architecture.hyperparameters.optimizer
+        );
+        training.lastLoss = result.loss;
+        training.lastAccuracy = result.accuracy;
+        training.step = result.step;
+        const epochsDone =
+          batchesPerEpoch > 0
+            ? Math.floor(result.step / batchesPerEpoch)
+            : 0;
+        statusMsg =
+          `continuous · step ${result.step} ` +
+          `(${epochsDone} epoch${epochsDone === 1 ? '' : 's'}) ` +
+          `· loss ${result.loss.toFixed(4)} ` +
+          `· acc ${(result.accuracy * 100).toFixed(1)}%`;
+        snapshotBatchChartCounts();
+        await loadBatch();
+      }
+      statusMsg =
+        `stopped · step ${training.step} ` +
+        (training.lastLoss !== null
+          ? `· loss ${training.lastLoss.toFixed(4)} `
+          : '') +
+        (training.lastAccuracy !== null
+          ? `· acc ${(training.lastAccuracy * 100).toFixed(1)}%`
+          : '');
+    } catch (e) {
+      statusMsg = `continuous train failed: ${(e as Error).message}`;
+    } finally {
+      abortContinuous = false;
+      continuousRunning = false;
+      busy = false;
+    }
+  }
+
+  function stopContinuous() {
+    abortContinuous = true;
   }
 
   async function saveCheckpoint() {
@@ -240,6 +441,9 @@
       training.numClasses = result.num_classes;
       training.paramCount = result.param_count;
       training.step = result.step;
+      training.lastLoss = null;
+      training.lastAccuracy = null;
+      training.batchChartCounts = { correct: 0, incorrect: 0, total: 0 };
       statusMsg = `loaded ${training.checkpointFilename} · step ${result.step}`;
       await refreshPredictions();
     } catch (e) {
@@ -251,6 +455,49 @@
 
   function onSelectImage(i: number) {
     training.selectedIndex = i;
+    // Lock in a verdict for this sample — same green/red feedback the
+    // Train 1 Batch (Fun) sweep uses, so manual clicks classify too.
+    recordVerdict(i);
+  }
+
+  // Compute correct/incorrect for sample `i` from the cached prediction
+  // and write it into batchVerdict. No-op if prediction or sample missing.
+  function recordVerdict(i: number) {
+    const probs = training.predictions[i];
+    const sample = training.batch[i];
+    if (!probs || !sample) return;
+    let bestIdx = 0;
+    for (let k = 1; k < probs.length; k++) {
+      if (probs[k] > probs[bestIdx]) bestIdx = k;
+    }
+    const predicted = selectedClasses[bestIdx];
+    training.batchVerdict[i] =
+      predicted === sample.label ? 'correct' : 'incorrect';
+  }
+
+  // Tally pre-step predictions for the current batch into batchChartCounts.
+  // Used by Fast / Epoch / Continuous, which don't run the per-image sweep
+  // and so need to snapshot the chart all at once. Must be called BEFORE
+  // loadBatch — once that runs, training.predictions is replaced.
+  function snapshotBatchChartCounts() {
+    let correct = 0;
+    let incorrect = 0;
+    for (let i = 0; i < training.batch.length; i++) {
+      const probs = training.predictions[i];
+      const sample = training.batch[i];
+      if (!probs || !sample) continue;
+      let bestIdx = 0;
+      for (let k = 1; k < probs.length; k++) {
+        if (probs[k] > probs[bestIdx]) bestIdx = k;
+      }
+      if (selectedClasses[bestIdx] === sample.label) correct++;
+      else incorrect++;
+    }
+    training.batchChartCounts = {
+      correct,
+      incorrect,
+      total: training.batch.length,
+    };
   }
 
   function sleep(ms: number) {
@@ -271,13 +518,21 @@
   <div class="flex-1 min-h-0 flex">
     <Sidebar
       onReinitialize={reinitialize}
-      onTrainBatch={trainOneBatch}
+      onTrainBatchFun={trainOneBatch}
+      onTrainBatchFast={trainOneBatchFast}
+      onTrainEpoch={trainOneEpoch}
+      onStopEpoch={stopEpoch}
+      onTrainContinuously={trainContinuously}
+      onStopContinuous={stopContinuous}
       onSaveCheckpoint={saveCheckpoint}
       onLoadCheckpoint={loadCheckpoint}
       canTrain={training.hasSession}
       {canReinit}
       {reinitBlockedReason}
       {busy}
+      {batchesPerEpoch}
+      {epochRunning}
+      {continuousRunning}
     />
 
     <div class="w-px shrink-0 bg-[var(--color-border)]"></div>
@@ -288,7 +543,7 @@
                border-b border-[var(--color-border)]"
       >
         <h4 class="text-xs font-semibold text-[var(--color-heading)]">
-          Batch · {training.batch.length}
+          Next Batch · {training.batch.length}
         </h4>
         <span class="text-xs text-[var(--color-muted)] font-mono truncate">
           {#if training.hasSession}
@@ -314,8 +569,22 @@
 
     <div class="w-px shrink-0 bg-[var(--color-border)]"></div>
 
-    <div class="w-72 shrink-0 min-h-0 flex flex-col">
-      <PredictionBar classes={selectedClasses} />
+    <div class="w-96 shrink-0 min-h-0 flex flex-col">
+      <header
+        class="flex items-baseline justify-between gap-3 px-3 py-1.5
+               border-b border-[var(--color-border)]"
+      >
+        <h4 class="text-xs font-semibold text-[var(--color-heading)]">
+          Prediction
+        </h4>
+      </header>
+      <div class="flex-1 min-h-0 flex">
+        <PredictionBar classes={selectedClasses} />
+        <div class="w-px shrink-0 bg-[var(--color-border)]"></div>
+        <div class="w-24 shrink-0 min-h-0 flex flex-col">
+          <BatchChart />
+        </div>
+      </div>
     </div>
   </div>
 </div>

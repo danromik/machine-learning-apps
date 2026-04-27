@@ -5,10 +5,10 @@
   import SymbolsSection from './data/SymbolsSection.svelte';
   import FontsSection from './data/FontsSection.svelte';
   import AugmentationSection from './data/AugmentationSection.svelte';
-  import TestSynthesisModal from './data/TestSynthesisModal.svelte';
+  import PreviewDataModal from './data/PreviewDataModal.svelte';
 
   let loadError = $state<string | null>(null);
-  let testModalOpen = $state(false);
+  let previewModalOpen = $state(false);
 
   $effect(() => {
     if (synthesis.loaded) return;
@@ -41,7 +41,7 @@
         Loading symbols and fonts…
       </div>
     {:else}
-      <PresetSelector onTestSynthesis={() => (testModalOpen = true)} />
+      <PresetSelector onPreviewData={() => (previewModalOpen = true)} />
       <SymbolsSection />
       <FontsSection />
       <AugmentationSection />
@@ -49,6 +49,6 @@
   </div>
 </div>
 
-{#if testModalOpen}
-  <TestSynthesisModal onClose={() => (testModalOpen = false)} />
+{#if previewModalOpen}
+  <PreviewDataModal onClose={() => (previewModalOpen = false)} />
 {/if}

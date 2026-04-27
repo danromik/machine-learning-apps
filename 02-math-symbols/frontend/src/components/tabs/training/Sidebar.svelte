@@ -3,22 +3,38 @@
 
   let {
     onReinitialize,
-    onTrainBatch,
+    onTrainBatchFun,
+    onTrainBatchFast,
+    onTrainEpoch,
+    onStopEpoch,
+    onTrainContinuously,
+    onStopContinuous,
     onSaveCheckpoint,
     onLoadCheckpoint,
     canTrain,
     busy,
     canReinit,
     reinitBlockedReason,
+    batchesPerEpoch,
+    epochRunning,
+    continuousRunning,
   }: {
     onReinitialize: () => void;
-    onTrainBatch: () => void;
+    onTrainBatchFun: () => void;
+    onTrainBatchFast: () => void;
+    onTrainEpoch: () => void;
+    onStopEpoch: () => void;
+    onTrainContinuously: () => void;
+    onStopContinuous: () => void;
     onSaveCheckpoint: () => void;
     onLoadCheckpoint: () => void;
     canTrain: boolean;
     busy: boolean;
     canReinit: boolean;
     reinitBlockedReason: string;
+    batchesPerEpoch: number;
+    epochRunning: boolean;
+    continuousRunning: boolean;
   } = $props();
 
   let canLoad = $derived.by(() => {
@@ -32,20 +48,26 @@
 <aside
   class="w-48 shrink-0 flex flex-col gap-2 p-3 overflow-auto"
 >
-  <button
-    type="button"
-    class="btn-outline w-full text-xs"
-    onclick={onReinitialize}
-    disabled={busy || !canReinit}
-    title={canReinit
-      ? 'Build a fresh model from the current architecture and hyperparameters'
-      : reinitBlockedReason}
-  >
-    Re-Initialize Model
-  </button>
+  <h3 class="text-sm font-semibold text-[var(--color-heading)]">
+    Training Controls
+  </h3>
+
+  <div class="flex justify-center">
+    <button
+      type="button"
+      class="btn-capsule"
+      onclick={onReinitialize}
+      disabled={busy || !canReinit}
+      title={canReinit
+        ? 'Build a fresh model from the current architecture and hyperparameters'
+        : reinitBlockedReason}
+    >
+      Re-Initialize Model
+    </button>
+  </div>
   {#if !canReinit}
     <div
-      class="text-[10px] text-[var(--color-danger)] leading-snug px-1 -mt-1"
+      class="text-[10px] text-[var(--color-danger)] leading-snug px-1 -mt-1 text-center"
     >
       {reinitBlockedReason}
     </div>
@@ -53,33 +75,73 @@
 
   <button
     type="button"
-    class="btn-primary w-full text-xs"
-    onclick={onTrainBatch}
+    class="btn-outline w-full text-xs"
+    onclick={onTrainBatchFun}
     disabled={busy || !canTrain}
     title={canTrain
-      ? 'Run one forward + backward + optimizer step on the current batch'
+      ? 'Train one batch with the per-image highlight + prediction sweep'
       : 'Initialize the model first'}
   >
-    Train (1 Batch)
+    Train 1 Batch (Fun)
   </button>
 
   <button
     type="button"
     class="btn-outline w-full text-xs"
-    disabled
-    title="Coming soon"
+    onclick={onTrainBatchFast}
+    disabled={busy || !canTrain}
+    title={canTrain
+      ? 'Train one batch immediately, without the per-image animation'
+      : 'Initialize the model first'}
   >
-    Train (1 Epoch)
+    Train 1 Batch (Fast)
   </button>
 
-  <button
-    type="button"
-    class="btn-outline w-full text-xs"
-    disabled
-    title="Coming soon"
-  >
-    Train Continuously
-  </button>
+  {#if epochRunning}
+    <button
+      type="button"
+      class="btn-danger w-full text-xs"
+      onclick={onStopEpoch}
+      title="Stop the current epoch at the next batch boundary"
+    >
+      Stop epoch
+    </button>
+  {:else}
+    <button
+      type="button"
+      class="btn-outline w-full text-xs"
+      onclick={onTrainEpoch}
+      disabled={busy || !canTrain || batchesPerEpoch <= 0}
+      title={canTrain
+        ? `Train ${batchesPerEpoch} batches (1 epoch)`
+        : 'Initialize the model first'}
+    >
+      Train 1 Epoch{batchesPerEpoch > 0 ? ` · ${batchesPerEpoch}` : ''}
+    </button>
+  {/if}
+
+  {#if continuousRunning}
+    <button
+      type="button"
+      class="btn-danger w-full text-xs"
+      onclick={onStopContinuous}
+      title="Stop continuous training at the next batch boundary"
+    >
+      Stop
+    </button>
+  {:else}
+    <button
+      type="button"
+      class="btn-outline w-full text-xs"
+      onclick={onTrainContinuously}
+      disabled={busy || !canTrain}
+      title={canTrain
+        ? 'Train indefinitely until you click Stop'
+        : 'Initialize the model first'}
+    >
+      Train Continuously
+    </button>
+  {/if}
 
   <hr class="my-2 border-[var(--color-border)]" />
 

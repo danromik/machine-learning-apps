@@ -6,8 +6,20 @@
   import ArchitectureTab from './components/tabs/ArchitectureTab.svelte';
   import TrainingTab from './components/tabs/TrainingTab.svelte';
   import InferenceTab from './components/tabs/InferenceTab.svelte';
-  import { ui, synthesis, applyPreset, type TabId } from './state.svelte';
+  import {
+    ui,
+    synthesis,
+    architecture,
+    training,
+    INPUT_SHAPE,
+    applyPreset,
+    type TabId,
+  } from './state.svelte';
   import { api } from './api';
+  import {
+    computeArchitecture,
+    formatCount,
+  } from './components/tabs/architecture/computeArchitecture';
 
   const TABS: { id: TabId; label: string }[] = [
     { id: 'orientation', label: 'Orientation' },
@@ -16,6 +28,73 @@
     { id: 'training', label: 'Training' },
     { id: 'inference', label: 'Inference' },
   ];
+
+  // Number of symbols across all selected categories — feeds both the Data
+  // Synthesis subtitle and the Architecture/Training computations.
+  let symbolCount = $derived.by(() => {
+    if (!synthesis.loaded) return 0;
+    let n = 0;
+    for (const c of synthesis.categories) {
+      if (synthesis.selectedCategories[c.id]) n += c.count;
+    }
+    return n;
+  });
+
+  let fontCount = $derived.by(() => {
+    if (!synthesis.loaded) return 0;
+    let n = 0;
+    for (const f of synthesis.fonts) {
+      const u = synthesis.fontUsage[f.family];
+      if (u === 'train' || u === 'val') n++;
+    }
+    return n;
+  });
+
+  let totalParams = $derived.by(() => {
+    const numClasses = symbolCount || 10;
+    return computeArchitecture(architecture.layers, INPUT_SHAPE, numClasses)
+      .totalParams;
+  });
+
+  // Number of batches required for one "epoch" — defined here as enough
+  // batches that each symbol gets, on average, samplesPerSymbolPerEpoch
+  // training examples. Uses the synthesis-derived class count when there's
+  // no live session.
+  let batchesPerEpoch = $derived.by(() => {
+    const classes = training.numClasses || symbolCount;
+    const bs = architecture.hyperparameters.batch_size;
+    if (classes <= 0 || bs <= 0) return 0;
+    return Math.max(
+      1,
+      Math.ceil((classes * training.samplesPerSymbolPerEpoch) / bs)
+    );
+  });
+
+  let tabSubtitles = $derived.by(() => {
+    const subs: Record<TabId, string> = {
+      orientation: '',
+      data: synthesis.loaded
+        ? `${symbolCount} symbols · ${fontCount} fonts`
+        : '',
+      architecture: `${architecture.layers.length} layers · ${formatCount(totalParams)} weights`,
+      training: '',
+      inference: '',
+    };
+
+    if (training.hasSession && batchesPerEpoch > 0) {
+      const epochs = Math.floor(training.step / batchesPerEpoch);
+      const batchInEpoch = training.step % batchesPerEpoch;
+      const accStr =
+        training.lastAccuracy === null
+          ? '— accuracy'
+          : `${(training.lastAccuracy * 100).toFixed(1)}% accuracy`;
+      subs.training = `${epochs} epochs · ${batchInEpoch} batches · ${accStr}`;
+    } else {
+      subs.training = 'no session';
+    }
+
+    return subs;
+  });
 
   $effect(() => {
     (async () => {
@@ -70,7 +149,13 @@
         onclick={() => (ui.activeTab = tab.id)}
       >
         <span class="tab-number">{i}</span>
-        <span>{tab.label}</span>
+        <span class="tab-label-stack">
+          <span class="tab-label-text">{tab.label}</span>
+          <!-- Always render the subtitle row (even empty) so every tab
+               has the same vertical extent — that keeps label baselines
+               aligned across the row when the nav uses items-end. -->
+          <span class="tab-subtitle">{tabSubtitles[tab.id] || ' '}</span>
+        </span>
       </button>
     {/each}
   </nav>

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { architecture } from '../../../state.svelte';
+  import { architecture, training } from '../../../state.svelte';
 
   const OPTIMIZERS = [
     { id: 'adam', label: 'Adam' },
@@ -54,5 +54,23 @@
         <option value={o.id}>{o.label}</option>
       {/each}
     </select>
+  </label>
+
+  <label
+    class="flex items-center gap-1.5"
+    title="An epoch is defined as enough batches that, on average, each symbol is trained on this many times."
+  >
+    <span class="text-xs text-[var(--color-muted)]">Samples / symbol / epoch</span>
+    <input
+      type="number"
+      step="1"
+      min="1"
+      class="input !py-0.5 !px-2 !text-xs !w-20"
+      value={training.samplesPerSymbolPerEpoch}
+      oninput={(e) => {
+        const v = parseInt((e.currentTarget as HTMLInputElement).value, 10);
+        if (Number.isFinite(v) && v >= 1) training.samplesPerSymbolPerEpoch = v;
+      }}
+    />
   </label>
 </div>

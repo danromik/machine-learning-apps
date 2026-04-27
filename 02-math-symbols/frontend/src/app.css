@@ -20,6 +20,11 @@ html[data-theme='github-light'] {
   --color-on-accent: #ffffff;
   --color-success: #1a7f37;
   --color-danger: #cf222e;
+  /* Distinct accent for the (Re-)Initialize capsule. Violet/fuchsia so it
+     reads as a primary "fresh start" action, separate from the regular
+     blue accent used for everything else. */
+  --color-reinit-from: #8b5cf6;
+  --color-reinit-to: #ec4899;
   color-scheme: light;
 }
 
@@ -36,6 +41,8 @@ html[data-theme='one-dark'] {
   --color-on-accent: #1b1f23;
   --color-success: #98c379;
   --color-danger: #e06c75;
+  --color-reinit-from: #a78bfa;
+  --color-reinit-to: #f472b6;
   color-scheme: dark;
 }
 
@@ -138,6 +145,45 @@ body {
   background: var(--color-surface-2);
 }
 
+/* Capsule-shaped CTA used for (Re-)Initialize Model — meant to read as a
+   distinct, attention-grabbing action separate from the row of identical
+   train buttons below it. */
+.btn-capsule {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
+  padding: 0.4rem 0.875rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  border-radius: 9999px;
+  border: 1px solid transparent;
+  color: #fff;
+  background: linear-gradient(
+    135deg,
+    var(--color-reinit-from),
+    var(--color-reinit-to)
+  );
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  cursor: pointer;
+  user-select: none;
+  transition: filter 100ms, transform 100ms, opacity 100ms;
+}
+.btn-capsule:hover:not(:disabled) {
+  filter: brightness(1.07);
+  transform: translateY(-1px);
+}
+.btn-capsule:active:not(:disabled) {
+  transform: translateY(0);
+}
+.btn-capsule:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 .input {
   width: 100%;
   border-radius: 0.375rem;
@@ -178,9 +224,13 @@ html[data-theme='one-dark'] .synth-img {
 /* ── Tabs ─────────────────────────────────────────────────────────────── */
 .tab-button {
   display: inline-flex;
-  align-items: center;
+  /* Align number digit and label by their text baselines so the digit
+     and label sit on the same line. Combined with the empty-but-rendered
+     subtitle row, this also keeps every tab's label at the same height
+     across the row. */
+  align-items: baseline;
   gap: 0.5rem;
-  padding: 0.625rem 1rem;
+  padding: 0.5rem 1rem;
   font-size: 0.875rem;
   font-weight: 500;
   color: var(--color-muted);
@@ -190,6 +240,28 @@ html[data-theme='one-dark'] .synth-img {
   cursor: pointer;
   transition: color 100ms, border-color 100ms, background 100ms;
   user-select: none;
+}
+.tab-label-stack {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  line-height: 1.15;
+}
+.tab-label-text {
+  /* Inherits the .tab-button font size + weight. */
+}
+.tab-subtitle {
+  margin-top: 0.125rem;
+  font-size: 0.65rem;
+  font-weight: 400;
+  font-family: var(--font-mono);
+  color: var(--color-muted);
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+.tab-button-active .tab-subtitle {
+  color: var(--color-accent);
+  opacity: 0.85;
 }
 .tab-button:hover:not(.tab-button-active) {
   color: var(--color-text);

@@ -176,7 +176,15 @@ def _collect_symbols(category_ids: list[str]) -> list[str]:
 
 def synthesize_iter(req: SynthesisRequest) -> Iterator[dict[str, Any]]:
     """Yield synthesized samples one at a time as
-    `{ png_b64, label, font, missing_glyph }` dicts."""
+    `{ png_b64, label, font, missing_glyph }` dicts.
+
+    Skips (char, font) pairs whose font doesn't actually contain the
+    glyph — those would render as the .notdef placeholder (an empty box),
+    so training on them would teach the model that "blank box → α" (etc.),
+    which poisons the labels. We pre-compute, per char, the subset of the
+    requested fonts that supports it and sample only from those pairs.
+    Chars that no requested font supports are silently dropped.
+    """
     rng = random.Random(req.seed)
 
     symbols = _collect_symbols(req.categories)
@@ -189,9 +197,25 @@ def synthesize_iter(req: SynthesisRequest) -> Iterator[dict[str, Any]]:
     if not fonts:
         return
 
+    # Per-char list of fonts that actually contain the glyph. Computed
+    # once up front; _has_glyph is cached so this is a fast pass.
+    supported_by_char: dict[str, list[str]] = {}
+    for char in set(symbols):
+        ok = []
+        for family in fonts:
+            path = font_path(family)
+            if path is not None and _has_glyph(char, path):
+                ok.append(family)
+        if ok:
+            supported_by_char[char] = ok
+
+    valid_chars = [c for c in symbols if c in supported_by_char]
+    if not valid_chars:
+        return
+
     for _ in range(req.count):
-        char = rng.choice(symbols)
-        family = rng.choice(fonts)
+        char = rng.choice(valid_chars)
+        family = rng.choice(supported_by_char[char])
         path = font_path(family)
         if path is None:
             continue
@@ -207,5 +231,7 @@ def synthesize_iter(req: SynthesisRequest) -> Iterator[dict[str, Any]]:
             "png_b64": png_b64,
             "label": char,
             "font": family,
-            "missing_glyph": not _has_glyph(char, path),
+            # Always False after the pre-filter, but kept in the response
+            # so the frontend's display path stays uniform.
+            "missing_glyph": False,
         }

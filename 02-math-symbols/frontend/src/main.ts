@@ -1,6 +1,7 @@
 import { mount } from 'svelte';
 import App from './App.svelte';
 import './app.css';
+import 'katex/dist/katex.min.css';
 import { initTheme } from './theme';
 
 // Set the data-theme attribute before any component mounts so the
