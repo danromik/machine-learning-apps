@@ -230,15 +230,22 @@ html[data-theme='one-dark'] .synth-img {
      across the row. */
   align-items: baseline;
   gap: 0.5rem;
-  padding: 0.5rem 1rem;
+  padding: 0.4rem 0.875rem;
   font-size: 0.875rem;
   font-weight: 500;
   color: var(--color-muted);
   background: transparent;
-  border: none;
-  border-bottom: 2px solid transparent;
+  /* Transparent border is always present so tabs don't shift by 1px when
+     they pick up a visible border on activation. */
+  border: 1px solid transparent;
+  border-radius: 0.5rem;
   cursor: pointer;
-  transition: color 100ms, border-color 100ms, background 100ms;
+  transition:
+    color 140ms ease,
+    background 140ms ease,
+    border-color 140ms ease,
+    box-shadow 140ms ease,
+    transform 140ms ease;
   user-select: none;
 }
 .tab-label-stack {
@@ -261,15 +268,27 @@ html[data-theme='one-dark'] .synth-img {
 }
 .tab-button-active .tab-subtitle {
   color: var(--color-accent);
-  opacity: 0.85;
+  opacity: 0.9;
 }
 .tab-button:hover:not(.tab-button-active) {
   color: var(--color-text);
   background: var(--color-surface-2);
+  transform: translateY(-1px);
 }
 .tab-button-active {
-  color: var(--color-accent);
-  border-bottom-color: var(--color-accent);
+  color: var(--color-heading);
+  /* Subtle vertical gradient: top edge tinted with accent, bottom edge
+     fades to surface — gives the active tab a "lit from above" feel
+     without the heavy bottom underline. */
+  background: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--color-accent) 10%, var(--color-surface)),
+    var(--color-surface)
+  );
+  border-color: var(--color-accent);
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.05),
+    0 6px 14px -6px color-mix(in srgb, var(--color-accent) 35%, transparent);
 }
 .tab-number {
   display: inline-flex;
@@ -282,8 +301,14 @@ html[data-theme='one-dark'] .synth-img {
   font-family: var(--font-mono);
   font-size: 0.7rem;
   color: var(--color-muted);
+  transition:
+    background 140ms ease,
+    color 140ms ease,
+    box-shadow 140ms ease;
 }
 .tab-button-active .tab-number {
   background: var(--color-accent);
   color: var(--color-on-accent);
+  box-shadow: 0 0 0 2px
+    color-mix(in srgb, var(--color-accent) 22%, transparent);
 }

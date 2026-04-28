@@ -4,6 +4,8 @@
     architecture,
     synthesis,
     training,
+    applyCheckpointResponse,
+    persistCheckpointPrefs,
   } from '../../state.svelte';
   import { api, streamSamples, type SynthesisSample } from '../../api';
   import HyperparametersBar from './training/HyperparametersBar.svelte';
@@ -13,17 +15,12 @@
   import BatchChart from './training/BatchChart.svelte';
   import LossChart from './training/LossChart.svelte';
 
-  let busy = $state(false);
-  let statusMsg = $state<string>('idle');
-  // True while trainOneEpoch is actively iterating. The sidebar uses this
-  // to flip the Train (1 Epoch) button into a Stop button.
-  let epochRunning = $state(false);
-  // Set true to interrupt an in-progress Train (1 Epoch) at the next batch
-  // boundary. Cleared at the start of each epoch run.
-  let abortEpoch = $state(false);
-  // Same pattern, for Train Continuously.
-  let continuousRunning = $state(false);
-  let abortContinuous = $state(false);
+  // busy / statusMsg / epoch+continuous run flags / abort flags all live
+  // on the global `training` store (state.svelte.ts) so a long-running
+  // train loop and its UI state survive the user navigating to another
+  // tab and back. The loop itself is a JS closure that keeps running
+  // after unmount; this just keeps the buttons and footer in sync with
+  // it after remount.
 
   // Number of batches in one "epoch" — derived from the user-set
   // samples-per-symbol target and the current batch size. Mirrors the
@@ -91,7 +88,7 @@
         training.hasSession = false;
       }
     } catch (e) {
-      statusMsg = `init failed: ${(e as Error).message}`;
+      training.statusMsg = `init failed: ${(e as Error).message}`;
     }
   });
 
@@ -148,7 +145,7 @@
       }
     } catch (e) {
       if ((e as Error).name === 'AbortError') return;
-      statusMsg = `batch load failed: ${(e as Error).message}`;
+      training.statusMsg = `batch load failed: ${(e as Error).message}`;
       return;
     }
     training.batch = samples;
@@ -187,7 +184,7 @@
       );
       training.predictions = predictions;
     } catch (e) {
-      statusMsg = `predict failed: ${(e as Error).message}`;
+      training.statusMsg = `predict failed: ${(e as Error).message}`;
     }
   }
 
@@ -247,15 +244,15 @@
 
   async function reinitialize() {
     if (selectedClasses.length === 0) {
-      statusMsg = 'no symbols selected — configure Data Synthesis first';
+      training.statusMsg = 'no symbols selected — configure Data Synthesis first';
       return;
     }
     if (architecture.layers.length === 0) {
-      statusMsg = 'no architecture defined — design or suggest one first';
+      training.statusMsg = 'no architecture defined — design or suggest one first';
       return;
     }
-    busy = true;
-    statusMsg = 'building model…';
+    training.busy = true;
+    training.statusMsg = 'building model…';
     try {
       const result = await api.initTraining({
         architecture: architecture.layers.map((l) => ({
@@ -268,6 +265,17 @@
           optimizer: architecture.hyperparameters.optimizer,
         },
         classes: selectedClasses,
+        // Snapshot of the synthesis pipeline this model is being built
+        // against — saved into checkpoints so a later Load can restore
+        // categories / fontUsage / augmentation in addition to weights.
+        synthesis_config: {
+          selectedCategories: { ...synthesis.selectedCategories },
+          fontUsage: { ...synthesis.fontUsage },
+          augmentation: {
+            noise: { ...synthesis.augmentation.noise },
+            skew: { ...synthesis.augmentation.skew },
+          },
+        },
       });
       training.hasSession = true;
       training.numClasses = result.num_classes;
@@ -278,20 +286,20 @@
       training.batchChartCounts = { correct: 0, incorrect: 0, total: 0 };
       training.lossHistory = [];
       training.valLossHistory = [];
-      statusMsg = `model initialized · ${result.param_count.toLocaleString()} params · ${result.num_classes} classes`;
+      training.statusMsg = `model initialized · ${result.param_count.toLocaleString()} params · ${result.num_classes} classes`;
       await refreshPredictions();
     } catch (e) {
-      statusMsg = `init failed: ${(e as Error).message}`;
+      training.statusMsg = `init failed: ${(e as Error).message}`;
     } finally {
-      busy = false;
+      training.busy = false;
     }
   }
 
   async function trainOneBatch() {
     if (training.batch.length === 0 || !training.hasSession) return;
-    busy = true;
+    training.busy = true;
     training.animating = true;
-    statusMsg = 'training (1 batch)…';
+    training.statusMsg = 'training (1 batch)…';
     try {
       // Make sure we have predictions to animate through.
       if (training.predictions.length !== training.batch.length) {
@@ -330,16 +338,17 @@
       training.step = result.step;
       recordTrainLoss(result.step, result.loss);
       await maybeRunValidation(result.step);
-      statusMsg =
+      training.statusMsg =
         `step ${result.step} · loss ${result.loss.toFixed(4)} ` +
         `· acc ${(result.accuracy * 100).toFixed(1)}%`;
       // Load a new batch + new predictions for the next round.
       await loadBatch();
     } catch (e) {
-      statusMsg = `train failed: ${(e as Error).message}`;
+      training.statusMsg = `train failed: ${(e as Error).message}`;
     } finally {
       training.animating = false;
-      busy = false;
+      training.busy = false;
+      await maybeAutoSave();
     }
   }
 
@@ -350,22 +359,22 @@
   async function trainOneEpoch() {
     if (!training.hasSession || batchesPerEpoch <= 0) return;
     if (training.batch.length === 0) {
-      statusMsg = 'no batch loaded — check Data Synthesis';
+      training.statusMsg = 'no batch loaded — check Data Synthesis';
       return;
     }
-    busy = true;
-    epochRunning = true;
-    abortEpoch = false;
+    training.busy = true;
+    training.epochRunning = true;
+    training.abortEpoch = false;
     const total = batchesPerEpoch;
-    statusMsg = `training (1 epoch = ${total} batches)…`;
+    training.statusMsg = `training (1 epoch = ${total} batches)…`;
     try {
       for (let i = 0; i < total; i++) {
-        if (abortEpoch) {
-          statusMsg = `training epoch interrupted (batch ${i}/${total}) · step ${training.step}`;
+        if (training.abortEpoch) {
+          training.statusMsg = `training epoch interrupted (batch ${i}/${total}) · step ${training.step}`;
           return;
         }
         if (training.batch.length === 0) {
-          statusMsg = `epoch stopped: failed to load batch ${i + 1}/${total}`;
+          training.statusMsg = `epoch stopped: failed to load batch ${i + 1}/${total}`;
           return;
         }
         const result = await api.trainBatch(
@@ -379,7 +388,7 @@
         training.step = result.step;
         recordTrainLoss(result.step, result.loss);
         await maybeRunValidation(result.step);
-        statusMsg =
+        training.statusMsg =
           `training epoch (batch ${i + 1}/${total}) · step ${result.step} ` +
           `· loss ${result.loss.toFixed(4)} ` +
           `· acc ${(result.accuracy * 100).toFixed(1)}%`;
@@ -390,7 +399,7 @@
         // grid when the user is watching).
         await loadBatch();
       }
-      statusMsg =
+      training.statusMsg =
         `epoch complete · step ${training.step} ` +
         (training.lastLoss !== null
           ? `· loss ${training.lastLoss.toFixed(4)} `
@@ -399,24 +408,28 @@
           ? `· acc ${(training.lastAccuracy * 100).toFixed(1)}%`
           : '');
     } catch (e) {
-      statusMsg = `epoch train failed: ${(e as Error).message}`;
+      training.statusMsg = `epoch train failed: ${(e as Error).message}`;
     } finally {
-      abortEpoch = false;
-      epochRunning = false;
-      busy = false;
+      training.abortEpoch = false;
+      training.epochRunning = false;
+      training.busy = false;
+      // Auto-save fires on every code path that completes a training
+      // op — clean exit, user-initiated stop, or thrown error. The
+      // helper itself no-ops when the toggle is off / no session.
+      await maybeAutoSave();
     }
   }
 
   function stopEpoch() {
-    abortEpoch = true;
+    training.abortEpoch = true;
   }
 
   // Same gradient step as trainOneBatch but without the per-image
   // highlight + prediction sweep — just train, update status, advance.
   async function trainOneBatchFast() {
     if (training.batch.length === 0 || !training.hasSession) return;
-    busy = true;
-    statusMsg = 'training (1 batch)…';
+    training.busy = true;
+    training.statusMsg = 'training (1 batch)…';
     try {
       const result = await api.trainBatch(
         training.batch.map((b) => b.png_b64),
@@ -429,7 +442,7 @@
       training.step = result.step;
       recordTrainLoss(result.step, result.loss);
       await maybeRunValidation(result.step);
-      statusMsg =
+      training.statusMsg =
         `step ${result.step} · loss ${result.loss.toFixed(4)} ` +
         `· acc ${(result.accuracy * 100).toFixed(1)}%`;
       // Snapshot pre-step prediction counts BEFORE loadBatch swaps the
@@ -437,9 +450,10 @@
       snapshotBatchChartCounts();
       await loadBatch();
     } catch (e) {
-      statusMsg = `train failed: ${(e as Error).message}`;
+      training.statusMsg = `train failed: ${(e as Error).message}`;
     } finally {
-      busy = false;
+      training.busy = false;
+      await maybeAutoSave();
     }
   }
 
@@ -450,17 +464,17 @@
   async function trainContinuously() {
     if (!training.hasSession) return;
     if (training.batch.length === 0) {
-      statusMsg = 'no batch loaded — check Data Synthesis';
+      training.statusMsg = 'no batch loaded — check Data Synthesis';
       return;
     }
-    busy = true;
-    continuousRunning = true;
-    abortContinuous = false;
-    statusMsg = 'training continuously…';
+    training.busy = true;
+    training.continuousRunning = true;
+    training.abortContinuous = false;
+    training.statusMsg = 'training continuously…';
     try {
-      while (!abortContinuous) {
+      while (!training.abortContinuous) {
         if (training.batch.length === 0) {
-          statusMsg = 'continuous stopped: failed to load batch';
+          training.statusMsg = 'continuous stopped: failed to load batch';
           return;
         }
         const result = await api.trainBatch(
@@ -478,7 +492,7 @@
           batchesPerEpoch > 0
             ? Math.floor(result.step / batchesPerEpoch)
             : 0;
-        statusMsg =
+        training.statusMsg =
           `continuous · step ${result.step} ` +
           `(${epochsDone} epoch${epochsDone === 1 ? '' : 's'}) ` +
           `· loss ${result.loss.toFixed(4)} ` +
@@ -486,7 +500,7 @@
         snapshotBatchChartCounts();
         await loadBatch();
       }
-      statusMsg =
+      training.statusMsg =
         `stopped · step ${training.step} ` +
         (training.lastLoss !== null
           ? `· loss ${training.lastLoss.toFixed(4)} `
@@ -495,52 +509,98 @@
           ? `· acc ${(training.lastAccuracy * 100).toFixed(1)}%`
           : '');
     } catch (e) {
-      statusMsg = `continuous train failed: ${(e as Error).message}`;
+      training.statusMsg = `continuous train failed: ${(e as Error).message}`;
     } finally {
-      abortContinuous = false;
-      continuousRunning = false;
-      busy = false;
+      training.abortContinuous = false;
+      training.continuousRunning = false;
+      training.busy = false;
+      await maybeAutoSave();
     }
   }
 
   function stopContinuous() {
-    abortContinuous = true;
+    training.abortContinuous = true;
   }
 
   async function saveCheckpoint() {
-    busy = true;
+    training.busy = true;
     try {
       const { name } = await api.saveCheckpoint(training.checkpointFilename);
       training.availableCheckpoints = (
         await api.listCheckpoints()
       ).files;
-      statusMsg = `saved ${name}`;
+      training.statusMsg = `saved ${name}`;
     } catch (e) {
-      statusMsg = `save failed: ${(e as Error).message}`;
+      training.statusMsg = `save failed: ${(e as Error).message}`;
     } finally {
-      busy = false;
+      training.busy = false;
+    }
+  }
+
+  // Fired at the end of every train op (single batch / epoch / continuous).
+  // No-op when the toggle is off, when no session exists, or when the
+  // filename is blank. Errors do not interrupt training — they just
+  // surface in the status footer the next time something writes there.
+  async function maybeAutoSave() {
+    if (!training.autoSave) return;
+    if (!training.hasSession) return;
+    const fname = training.checkpointFilename.trim();
+    if (!fname) return;
+    try {
+      const { name } = await api.saveCheckpoint(fname);
+      training.availableCheckpoints = (await api.listCheckpoints()).files;
+      // Append rather than replace the status — losing the loss/acc
+      // line every save would be obnoxious during continuous training.
+      training.statusMsg = `${training.statusMsg} · auto-saved ${name}`;
+    } catch (e) {
+      console.warn('auto-save failed:', e);
+    }
+  }
+
+  function onToggleAutoSave(v: boolean) {
+    training.autoSave = v;
+    persistCheckpointPrefs();
+  }
+
+  function onToggleAutoLoadOnRestart(v: boolean) {
+    training.autoLoadOnRestart = v;
+    persistCheckpointPrefs();
+  }
+
+  function onChangeFilename(v: string) {
+    training.checkpointFilename = v;
+    persistCheckpointPrefs();
+  }
+
+  async function deleteCheckpointFile(name: string) {
+    training.busy = true;
+    try {
+      await api.deleteCheckpoint(name);
+      training.availableCheckpoints = (
+        await api.listCheckpoints()
+      ).files;
+      training.statusMsg = `deleted ${name}`;
+    } catch (e) {
+      training.statusMsg = `delete failed: ${(e as Error).message}`;
+    } finally {
+      training.busy = false;
     }
   }
 
   async function loadCheckpoint() {
-    busy = true;
+    training.busy = true;
     try {
       const result = await api.loadCheckpoint(training.checkpointFilename);
-      training.hasSession = true;
-      training.numClasses = result.num_classes;
-      training.paramCount = result.param_count;
-      training.step = result.step;
-      training.lastLoss = null;
-      training.lastAccuracy = null;
-      training.batchChartCounts = { correct: 0, incorrect: 0, total: 0 };
-      training.lossHistory = [];
-      training.valLossHistory = [];
-      statusMsg = `loaded ${training.checkpointFilename} · step ${result.step}`;
-      await refreshPredictions();
+      await applyCheckpointResponse(result);
+      // Re-stream a batch under the freshly-loaded synthesis config.
+      // applyCheckpointResponse cleared training.batch, so this won't
+      // refresh against stale samples.
+      await loadBatch();
+      training.statusMsg = `loaded ${training.checkpointFilename} · step ${result.step}`;
     } catch (e) {
-      statusMsg = `load failed: ${(e as Error).message}`;
+      training.statusMsg = `load failed: ${(e as Error).message}`;
     } finally {
-      busy = false;
+      training.busy = false;
     }
   }
 
@@ -617,13 +677,17 @@
       onStopContinuous={stopContinuous}
       onSaveCheckpoint={saveCheckpoint}
       onLoadCheckpoint={loadCheckpoint}
+      onChangeFilename={onChangeFilename}
+      onDeleteCheckpoint={deleteCheckpointFile}
+      onToggleAutoSave={onToggleAutoSave}
+      onToggleAutoLoadOnRestart={onToggleAutoLoadOnRestart}
       canTrain={training.hasSession}
       {canReinit}
       {reinitBlockedReason}
-      {busy}
+      busy={training.busy}
       {batchesPerEpoch}
-      {epochRunning}
-      {continuousRunning}
+      epochRunning={training.epochRunning}
+      continuousRunning={training.continuousRunning}
     />
 
     <div class="w-px shrink-0 bg-[var(--color-border)]"></div>
@@ -654,7 +718,7 @@
         class="px-3 py-1.5 border-t border-[var(--color-border)]
                text-xs text-[var(--color-muted)] truncate"
       >
-        {statusMsg}
+        {training.statusMsg}
       </footer>
     </div>
 

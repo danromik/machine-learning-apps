@@ -11,9 +11,10 @@ Endpoints:
   GET  /api/training/state              current session status
   POST /api/training/predict            forward-only on a list of base64 PNGs
   POST /api/training/train_batch        one forward + backward + step
-  GET  /api/training/checkpoints        list checkpoint files in checkpoints/
-  POST /api/training/checkpoints/save   save current session under a filename
-  POST /api/training/checkpoints/load   load a session from a checkpoint file
+  GET  /api/training/checkpoints         list checkpoint files in checkpoints/
+  POST /api/training/checkpoints/save    save current session under a filename
+  POST /api/training/checkpoints/load    load a session from a checkpoint file
+  POST /api/training/checkpoints/delete  remove a checkpoint file from disk
 """
 from __future__ import annotations
 
@@ -372,6 +373,11 @@ class InitTrainingReq(BaseModel):
     architecture: list[dict]
     hyperparameters: TrainingHyperparameters
     classes: list[str]
+    # Snapshot of the synthesis config (selectedCategories, fontUsage,
+    # augmentation) the model is being built against. Optional because
+    # older callers may not send it; checkpoint save/load rely on it
+    # being present.
+    synthesis_config: dict | None = None
 
 
 class PredictReq(BaseModel):
@@ -424,6 +430,7 @@ def post_training_init(req: InitTrainingReq):
             req.hyperparameters.model_dump(),
             req.classes,
             device,
+            synthesis_config=req.synthesis_config,
         )
     except ValueError as e:
         raise HTTPException(400, str(e))
@@ -492,6 +499,17 @@ def post_save_checkpoint(req: CheckpointReq):
     return {"name": name}
 
 
+@app.post("/api/training/checkpoints/delete")
+def post_delete_checkpoint(req: CheckpointReq):
+    try:
+        name = _training.delete_checkpoint(req.filename)
+    except FileNotFoundError as e:
+        raise HTTPException(404, f"no such checkpoint: {e}")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"name": name}
+
+
 @app.post("/api/training/checkpoints/load")
 def post_load_checkpoint(req: CheckpointReq):
     try:
@@ -499,7 +517,17 @@ def post_load_checkpoint(req: CheckpointReq):
     except FileNotFoundError as e:
         raise HTTPException(404, f"no such checkpoint: {e}")
     _training_state["session"] = session
-    return _session_summary(session)
+    # Return the full pipeline state so the frontend can restore the
+    # synthesis tab, architecture diagram, hyperparameter sliders, and
+    # the training/validation loss curves to match the loaded model.
+    return {
+        **_session_summary(session),
+        "layers": session.layers,
+        "classes": session.classes,
+        "synthesis_config": session.synthesis_config,
+        "loss_history": session.loss_history,
+        "val_loss_history": session.val_loss_history,
+    }
 
 
 # Serve built frontend if present.

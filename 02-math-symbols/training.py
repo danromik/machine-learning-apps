@@ -28,6 +28,11 @@ from synthesis import CANVAS_SIZE
 
 CKPT_DIR = Path(__file__).resolve().parent / "checkpoints"
 
+# Cap each loss series so a long Train Continuously run can't grow them
+# without bound. Mirrors the frontend's cap so save/load doesn't behave
+# differently from the live in-memory chart.
+MAX_LOSS_HISTORY = 2000
+
 
 # ── Model construction ────────────────────────────────────────────────
 
@@ -129,6 +134,7 @@ class TrainingSession:
         hyperparameters: dict[str, Any],
         classes: list[str],
         device: torch.device,
+        synthesis_config: dict[str, Any] | None = None,
     ) -> None:
         if not classes:
             raise ValueError("classes list is empty")
@@ -138,6 +144,13 @@ class TrainingSession:
         self.num_classes = len(self.classes)
         self.label_to_index = {c: i for i, c in enumerate(self.classes)}
         self.device = device
+        # Snapshot of the data synthesis config (selectedCategories,
+        # fontUsage, augmentation) the model was built against. Persisted
+        # in checkpoints so loading restores the full pipeline, not just
+        # the weights + class table.
+        self.synthesis_config = (
+            dict(synthesis_config) if synthesis_config is not None else None
+        )
 
         self.lr = float(hyperparameters["lr"])
         self.batch_size = int(hyperparameters["batch_size"])
@@ -148,6 +161,12 @@ class TrainingSession:
             self.optimizer_name, self.model.parameters(), self.lr
         )
         self.step = 0
+        # Per-step training loss and (sparser) validation loss series.
+        # Each entry is {"step": int, "loss": float}. Persisted in the
+        # checkpoint so charts survive a save/load cycle and the user
+        # can train across multiple sessions without losing context.
+        self.loss_history: list[dict[str, float]] = []
+        self.val_loss_history: list[dict[str, float]] = []
 
     # ── inference / training ──────────────────────────────────────────
 
@@ -182,7 +201,15 @@ class TrainingSession:
         loss = F.cross_entropy(logits, y)
         preds = logits.argmax(dim=1)
         accuracy = float((preds == y).float().mean().item())
-        return {"loss": float(loss.item()), "accuracy": accuracy}
+        loss_value = float(loss.item())
+        # Log against the *current* training step — eval doesn't advance
+        # the optimizer, so multiple eval calls between train steps would
+        # land at the same x-coordinate. The frontend gates eval to once
+        # per N batches so this is fine in practice.
+        self.val_loss_history.append({"step": self.step, "loss": loss_value})
+        if len(self.val_loss_history) > MAX_LOSS_HISTORY:
+            self.val_loss_history = self.val_loss_history[-MAX_LOSS_HISTORY:]
+        return {"loss": loss_value, "accuracy": accuracy}
 
     def set_lr(self, lr: float) -> None:
         """Hot-swap the optimizer's learning rate without rebuilding it.
@@ -248,7 +275,11 @@ class TrainingSession:
         loss.backward()
         self.optimizer.step()
         self.step += 1
-        return {"loss": float(loss.item()), "step": self.step, "accuracy": accuracy}
+        loss_value = float(loss.item())
+        self.loss_history.append({"step": self.step, "loss": loss_value})
+        if len(self.loss_history) > MAX_LOSS_HISTORY:
+            self.loss_history = self.loss_history[-MAX_LOSS_HISTORY:]
+        return {"loss": loss_value, "step": self.step, "accuracy": accuracy}
 
     # ── meta ──────────────────────────────────────────────────────────
 
@@ -278,6 +309,9 @@ def save_checkpoint(session: TrainingSession, filename: str) -> str:
             },
             "classes": session.classes,
             "step": session.step,
+            "synthesis_config": session.synthesis_config,
+            "loss_history": list(session.loss_history),
+            "val_loss_history": list(session.val_loss_history),
         },
         path,
     )
@@ -292,17 +326,41 @@ def load_checkpoint(filename: str, device: torch.device) -> TrainingSession:
         raise FileNotFoundError(filename)
     ckpt = torch.load(path, map_location=device, weights_only=False)
     session = TrainingSession(
-        ckpt["layers"], ckpt["hyperparameters"], ckpt["classes"], device,
+        ckpt["layers"],
+        ckpt["hyperparameters"],
+        ckpt["classes"],
+        device,
+        synthesis_config=ckpt.get("synthesis_config"),
     )
     session.model.load_state_dict(ckpt["state_dict"])
     session.step = int(ckpt.get("step", 0))
+    # Older checkpoints predate history persistence — fall back to
+    # empty lists rather than crashing.
+    session.loss_history = list(ckpt.get("loss_history") or [])
+    session.val_loss_history = list(ckpt.get("val_loss_history") or [])
     return session
 
 
-def list_checkpoints() -> list[str]:
+def list_checkpoints() -> list[dict[str, Any]]:
+    """Return one dict per checkpoint file: name, size in bytes, and
+    mtime as unix seconds. Sorted by name so the order is stable across
+    refreshes. The frontend uses size + mtime to render a metadata
+    column next to each file name."""
     if not CKPT_DIR.exists():
         return []
-    return sorted(p.name for p in CKPT_DIR.glob("*.pt"))
+    files = []
+    for p in sorted(CKPT_DIR.glob("*.pt"), key=lambda x: x.name):
+        try:
+            st = p.stat()
+            files.append({
+                "name": p.name,
+                "size": int(st.st_size),
+                "mtime": float(st.st_mtime),
+            })
+        except OSError:
+            # File disappeared between glob and stat — skip silently.
+            continue
+    return files
 
 
 def checkpoint_exists(filename: str) -> bool:
@@ -311,3 +369,23 @@ def checkpoint_exists(filename: str) -> bool:
     if not filename.endswith(".pt"):
         filename = filename + ".pt"
     return (CKPT_DIR / filename).exists()
+
+
+def delete_checkpoint(filename: str) -> str:
+    """Remove a checkpoint file. Raises FileNotFoundError if missing.
+
+    Filename is sandboxed to CKPT_DIR — any path component containing /
+    or \\ or .. is rejected so the endpoint can't be used to remove
+    arbitrary files via path traversal.
+    """
+    if not filename:
+        raise FileNotFoundError("empty filename")
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise ValueError(f"invalid filename: {filename!r}")
+    if not filename.endswith(".pt"):
+        filename = filename + ".pt"
+    path = CKPT_DIR / filename
+    if not path.exists():
+        raise FileNotFoundError(filename)
+    path.unlink()
+    return path.name

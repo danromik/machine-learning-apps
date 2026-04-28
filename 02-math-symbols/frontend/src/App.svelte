@@ -6,6 +6,7 @@
   import ArchitectureTab from './components/tabs/ArchitectureTab.svelte';
   import TrainingTab from './components/tabs/TrainingTab.svelte';
   import InferenceTab from './components/tabs/InferenceTab.svelte';
+  import DebriefTab from './components/tabs/DebriefTab.svelte';
   import {
     ui,
     synthesis,
@@ -13,6 +14,8 @@
     training,
     INPUT_SHAPE,
     applyPreset,
+    applyCheckpointResponse,
+    persistUiPrefs,
     type TabId,
   } from './state.svelte';
   import { api } from './api';
@@ -27,6 +30,7 @@
     { id: 'architecture', label: 'Model Architecture' },
     { id: 'training', label: 'Training' },
     { id: 'inference', label: 'Inference' },
+    { id: 'debrief', label: 'Debrief' },
   ];
 
   // Number of symbols across all selected categories — feeds both the Data
@@ -79,6 +83,7 @@
       architecture: `${architecture.layers.length} layers · ${formatCount(totalParams)} weights`,
       training: '',
       inference: '',
+      debrief: '',
     };
 
     if (training.hasSession && batchesPerEpoch > 0) {
@@ -91,6 +96,22 @@
       subs.training = `${epochs} epochs · ${batchInEpoch} batches · ${accStr}`;
     } else {
       subs.training = 'no session';
+    }
+
+    // Debrief subtitle mirrors training's progress signal so the user
+    // can see at a glance whether they have something to celebrate.
+    if (training.hasSession && training.step > 0) {
+      if (training.lastAccuracy !== null) {
+        subs.debrief = `${(training.lastAccuracy * 100).toFixed(1)}% accuracy`;
+      } else {
+        subs.debrief = `step ${training.step.toLocaleString()}`;
+      }
+    } else if (architecture.layers.length > 0) {
+      subs.debrief = 'ready to train';
+    } else if (synthesis.loaded && symbolCount > 0) {
+      subs.debrief = 'design needed';
+    } else {
+      subs.debrief = '';
     }
 
     return subs;
@@ -119,12 +140,58 @@
     })();
   });
 
+  // Persist the active tab to localStorage on every change so a reload
+  // returns the user to the same tab. The first run after page load just
+  // re-saves whatever was restored at module init — cheap and keeps the
+  // effect declarative.
+  $effect(() => {
+    // Reading ui.activeTab inside persistUiPrefs() registers it as a dep.
+    persistUiPrefs();
+  });
+
+  // Auto-load on restart. Once synthesis is ready (so applyCheckpointResponse
+  // can swap categories/fonts/augmentation in without racing the preload),
+  // attempt to load the checkpoint named in the filename text box. Only
+  // runs once per page load — guarded by a local flag.
+  let autoLoadAttempted = false;
+  $effect(() => {
+    if (!synthesis.loaded) return;
+    if (autoLoadAttempted) return;
+    if (!training.autoLoadOnRestart) return;
+    const fname = training.checkpointFilename.trim();
+    if (!fname) return;
+    autoLoadAttempted = true;
+    (async () => {
+      try {
+        const { files } = await api.listCheckpoints();
+        training.availableCheckpoints = files;
+        const withExt = fname.endsWith('.pt') ? fname : `${fname}.pt`;
+        if (!files.some((c) => c.name === withExt)) {
+          console.info(
+            `auto-load skipped: no checkpoint named ${withExt}`
+          );
+          return;
+        }
+        const result = await api.loadCheckpoint(fname);
+        await applyCheckpointResponse(result);
+      } catch (e) {
+        console.warn('auto-load failed:', e);
+      }
+    })();
+  });
+
   // Whenever the data synthesis config changes (categories, font usage,
   // augmentation), invalidate any architecture and training session
   // built against the old config — class identity / count is determined
   // by selectedCategories, so the existing model's class table won't
   // line up with new batches. JSON.stringify is enough to track the
   // deep state via Svelte's reactive proxies.
+  //
+  // The `suppressSynthesisInvalidation` flag lets the checkpoint-load
+  // path rewrite synthesis state to match the loaded model without the
+  // effect tearing the session back down. We still update the sig so
+  // that once the suppression lifts, the new config is treated as the
+  // baseline.
   let lastSynthesisSig: string | null = null;
   $effect(() => {
     const sig = JSON.stringify({
@@ -139,6 +206,7 @@
     }
     if (sig === lastSynthesisSig) return;
     lastSynthesisSig = sig;
+    if (training.suppressSynthesisInvalidation > 0) return;
 
     // Architecture → empty layer list, no stale suggestion.
     architecture.layers = [];
@@ -175,7 +243,7 @@
   <Header />
 
   <nav
-    class="flex items-end gap-1 px-4 border-b border-[var(--color-border)]
+    class="flex items-center gap-1.5 px-4 py-1.5 border-b border-[var(--color-border)]
            bg-[var(--color-surface)]/40 shrink-0"
   >
     {#each TABS as tab, i}
@@ -208,6 +276,8 @@
       <TrainingTab />
     {:else if ui.activeTab === 'inference'}
       <InferenceTab />
+    {:else if ui.activeTab === 'debrief'}
+      <DebriefTab />
     {/if}
   </main>
 

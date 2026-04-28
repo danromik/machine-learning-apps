@@ -1,11 +1,78 @@
-import type { Font, PresetName, SymbolCategory, SynthesisPreset } from './api';
+import { tick } from 'svelte';
+import type {
+  CheckpointFile,
+  CheckpointLoadResponse,
+  Font,
+  PresetName,
+  SymbolCategory,
+  SynthesisPreset,
+} from './api';
 import type { Layer, LayerType } from './components/tabs/architecture/computeArchitecture';
 
-export type TabId = 'orientation' | 'data' | 'architecture' | 'training' | 'inference';
+export type TabId =
+  | 'orientation'
+  | 'data'
+  | 'architecture'
+  | 'training'
+  | 'inference'
+  | 'debrief';
 
 export const ui = $state({
   activeTab: 'orientation' as TabId,
 });
+
+// ── UI prefs persistence ────────────────────────────────────────────────
+//
+// Active tab survives across browser reloads via localStorage. Read once
+// at module load (synchronous, before any component mounts) so the user
+// lands on whichever tab they were on last. Persisted by an $effect in
+// App.svelte that calls persistUiPrefs() on every activeTab change.
+
+const UI_PREFS_KEY = 'math-symbols.ui-prefs.v1';
+
+const VALID_TABS: TabId[] = [
+  'orientation',
+  'data',
+  'architecture',
+  'training',
+  'inference',
+  'debrief',
+];
+
+function readUiPrefs(): { activeTab?: TabId } {
+  if (typeof localStorage === 'undefined') return {};
+  try {
+    const raw = localStorage.getItem(UI_PREFS_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as { activeTab?: unknown };
+    if (parsed && typeof parsed === 'object') {
+      const t = parsed.activeTab;
+      if (typeof t === 'string' && (VALID_TABS as string[]).includes(t)) {
+        return { activeTab: t as TabId };
+      }
+    }
+    return {};
+  } catch {
+    return {};
+  }
+}
+
+export function persistUiPrefs() {
+  if (typeof localStorage === 'undefined') return;
+  try {
+    localStorage.setItem(
+      UI_PREFS_KEY,
+      JSON.stringify({ activeTab: ui.activeTab })
+    );
+  } catch {
+    // localStorage can throw under quota / private mode — ignore.
+  }
+}
+
+const _initialUiPrefs = readUiPrefs();
+if (_initialUiPrefs.activeTab) {
+  ui.activeTab = _initialUiPrefs.activeTab;
+}
 
 // Bumped when the active theme changes, so chart components can rebuild
 // against the new CSS variables. (Will be used once charts land in the
@@ -151,8 +218,165 @@ export const training = $state({
   // (any number of batches is "valid"; this just sets a meaningful unit).
   samplesPerSymbolPerEpoch: 50,
 
-  // Checkpoint filename text field (sticky across navigations).
+  // Live state for in-progress training operations. Lifted out of
+  // TrainingTab.svelte so a long-running Train 1 Epoch / Train
+  // Continuously loop survives the user navigating to another tab and
+  // back — the loop is a JS closure that keeps running, but the local
+  // component state would be lost on unmount, leaving the buttons and
+  // status footer out of sync with reality on remount.
+  busy: false,
+  statusMsg: 'idle' as string,
+  epochRunning: false,
+  abortEpoch: false,
+  continuousRunning: false,
+  abortContinuous: false,
+
+  // Checkpoint filename text field (sticky across navigations and across
+  // browser sessions via localStorage — see initCheckpointPrefs / persist).
   checkpointFilename: 'model.pt',
   // List of available checkpoint files (refreshed on tab mount and after save).
-  availableCheckpoints: [] as string[],
+  // Each entry carries name, size in bytes, and mtime in unix seconds so the
+  // sidebar can show a "filesize / last save" line under the filename input.
+  availableCheckpoints: [] as CheckpointFile[],
+  // User toggles for automatic save/load. Persisted to localStorage so they
+  // survive page reloads. Auto-save fires after every train op; auto-load
+  // fires once at app start when the toggle is on.
+  autoSave: false,
+  autoLoadOnRestart: false,
+  // While > 0, App.svelte's synthesis-change effect skips the wholesale
+  // reset (architecture wipe + session drop). Used by the checkpoint load
+  // path, which itself rewrites synthesis state to match the loaded model
+  // and would otherwise trip the invalidation it's trying to avoid.
+  suppressSynthesisInvalidation: 0,
 });
+
+// ── Checkpoint UI prefs persistence ─────────────────────────────────────
+//
+// Three fields ride localStorage: the filename in the textbox, the
+// auto-save toggle, and the auto-load-on-restart toggle. We init from
+// storage at module load (synchronous, before any component mounts) so
+// the textbox and checkboxes render with the user's last values, and the
+// auto-load decision can be made the moment the app boots.
+
+const CKPT_PREFS_KEY = 'math-symbols.checkpoint-prefs.v1';
+
+type CheckpointPrefs = {
+  filename: string;
+  autoSave: boolean;
+  autoLoadOnRestart: boolean;
+};
+
+function readCheckpointPrefs(): Partial<CheckpointPrefs> {
+  if (typeof localStorage === 'undefined') return {};
+  try {
+    const raw = localStorage.getItem(CKPT_PREFS_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Partial<CheckpointPrefs>;
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+export function persistCheckpointPrefs() {
+  if (typeof localStorage === 'undefined') return;
+  const prefs: CheckpointPrefs = {
+    filename: training.checkpointFilename,
+    autoSave: training.autoSave,
+    autoLoadOnRestart: training.autoLoadOnRestart,
+  };
+  try {
+    localStorage.setItem(CKPT_PREFS_KEY, JSON.stringify(prefs));
+  } catch {
+    // localStorage can throw under quota / private mode — ignore.
+  }
+}
+
+const _initialCkptPrefs = readCheckpointPrefs();
+if (typeof _initialCkptPrefs.filename === 'string' && _initialCkptPrefs.filename) {
+  training.checkpointFilename = _initialCkptPrefs.filename;
+}
+if (typeof _initialCkptPrefs.autoSave === 'boolean') {
+  training.autoSave = _initialCkptPrefs.autoSave;
+}
+if (typeof _initialCkptPrefs.autoLoadOnRestart === 'boolean') {
+  training.autoLoadOnRestart = _initialCkptPrefs.autoLoadOnRestart;
+}
+
+// ── Checkpoint response → state restoration ─────────────────────────────
+//
+// Apply a /api/training/checkpoints/load response onto the reactive
+// stores: synthesis (categories / fonts / augmentation), architecture
+// (layers + hyperparameters), and training session metadata. Used by
+// the manual Load button and by auto-load-on-restart.
+//
+// The synthesis-change effect in App.svelte normally reacts to any
+// edit by clearing architecture and dropping the backend session.
+// That's the wrong behavior here — we *want* the loaded synthesis
+// state — so we hold the suppression flag across the synthesis writes
+// and tick() to let the effect run-and-skip before releasing it.
+export async function applyCheckpointResponse(r: CheckpointLoadResponse) {
+  // Synthesis: only assign fields the checkpoint actually carries. An
+  // older checkpoint without synthesis_config keeps the user's current
+  // synthesis state (and the class-set mismatch will surface on the
+  // next train_batch — same behavior we already had pre-feature).
+  if (r.synthesis_config) {
+    training.suppressSynthesisInvalidation++;
+    try {
+      synthesis.selectedCategories = { ...r.synthesis_config.selectedCategories };
+      synthesis.fontUsage = { ...r.synthesis_config.fontUsage };
+      synthesis.augmentation = {
+        noise: { ...r.synthesis_config.augmentation.noise },
+        skew: { ...r.synthesis_config.augmentation.skew },
+      };
+      synthesis.activePreset = null;
+      // Flush so App.svelte's $effect sees the new sig, takes the
+      // suppression branch, and updates lastSynthesisSig — leaving us
+      // a clean baseline for future user edits.
+      await tick();
+    } finally {
+      training.suppressSynthesisInvalidation--;
+    }
+  }
+
+  // Architecture: rebuild layer list from the saved spec, generating
+  // fresh frontend IDs. Hyperparameter sliders match the loaded model.
+  let counter = 0;
+  const nid = () => `ckpt-${Date.now().toString(36)}-${counter++}`;
+  architecture.layers = r.layers.map((l) => ({
+    id: nid(),
+    type: l.type as LayerType,
+    params: { ...l.params },
+  }));
+  architecture.hyperparameters = {
+    lr: r.lr,
+    batch_size: r.batch_size,
+    optimizer: r.optimizer as Optimizer,
+  };
+  architecture.suggestionReasoning = null;
+
+  // Training session metadata.
+  training.hasSession = true;
+  training.numClasses = r.num_classes;
+  training.paramCount = r.param_count;
+  training.step = r.step;
+  training.batchChartCounts = { correct: 0, incorrect: 0, total: 0 };
+  // Restore loss curves so charts pick up where the user left off. The
+  // backend appends to these on every train_batch / eval_batch, so the
+  // checkpoint always carries the full series the user saw on screen.
+  training.lossHistory = r.loss_history.map((p) => ({ ...p }));
+  training.valLossHistory = r.val_loss_history.map((p) => ({ ...p }));
+  // Seed lastLoss / lastAccuracy from the most recent training point so
+  // the status badge isn't blank right after load. Accuracy isn't in
+  // the saved series — leave it null and let the next batch fill it.
+  const lastTrain =
+    training.lossHistory[training.lossHistory.length - 1] ?? null;
+  training.lastLoss = lastTrain ? lastTrain.loss : null;
+  training.lastAccuracy = null;
+  // Force a fresh batch on next TrainingTab interaction — the existing
+  // batch was rendered against whatever synthesis was set before load.
+  training.batch = [];
+  training.predictions = [];
+  training.batchVerdict = [];
+  training.selectedIndex = null;
+}

@@ -55,6 +55,44 @@ export type SessionState =
       optimizer: string;
     };
 
+// Snapshot of the data synthesis pipeline saved alongside model weights.
+// Mirrors the three fields the frontend tracks reactively (and uses to
+// invalidate the session on change).
+export type CheckpointSynthesisConfig = {
+  selectedCategories: Record<string, boolean>;
+  fontUsage: Record<string, 'off' | 'train' | 'val'>;
+  augmentation: {
+    noise: { enabled: boolean; max_level: number };
+    skew: { enabled: boolean };
+  };
+};
+
+// Layer payload as it lives in checkpoints — same shape `train_init` /
+// `train_batch` use, minus the frontend-only `id` field.
+export type CheckpointLayer = {
+  type: string;
+  params: Record<string, number>;
+};
+
+export type LossPoint = { step: number; loss: number };
+
+export type CheckpointFile = {
+  name: string;
+  // Size in bytes; mtime in unix seconds. Frontend formats both for
+  // display (e.g. "1.4 MB", "14:32 today").
+  size: number;
+  mtime: number;
+};
+
+export type CheckpointLoadResponse = SessionState & {
+  has_session: true;
+  layers: CheckpointLayer[];
+  classes: string[];
+  synthesis_config: CheckpointSynthesisConfig | null;
+  loss_history: LossPoint[];
+  val_loss_history: LossPoint[];
+};
+
 export type TrainBatchResult = { loss: number; step: number; accuracy: number };
 
 export type Device = {
@@ -96,6 +134,7 @@ export const api = {
     architecture: { type: string; params: Record<string, number> }[];
     hyperparameters: TrainingHyperparameters;
     classes: string[];
+    synthesis_config?: CheckpointSynthesisConfig;
   }) =>
     j<SessionState & { has_session: true }>(
       fetch('/api/training/init', {
@@ -139,7 +178,7 @@ export const api = {
       })
     ),
   listCheckpoints: () =>
-    j<{ files: string[] }>(fetch('/api/training/checkpoints')),
+    j<{ files: CheckpointFile[] }>(fetch('/api/training/checkpoints')),
   saveCheckpoint: (filename: string) =>
     j<{ name: string }>(
       fetch('/api/training/checkpoints/save', {
@@ -149,8 +188,16 @@ export const api = {
       })
     ),
   loadCheckpoint: (filename: string) =>
-    j<SessionState & { has_session: true }>(
+    j<CheckpointLoadResponse>(
       fetch('/api/training/checkpoints/load', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename }),
+      })
+    ),
+  deleteCheckpoint: (filename: string) =>
+    j<{ name: string }>(
+      fetch('/api/training/checkpoints/delete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ filename }),
