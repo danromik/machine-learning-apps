@@ -2,8 +2,6 @@
 
 A growing suite of small, self-contained applications for learning and experimenting with machine learning. Each project trains a real neural network end-to-end and pairs the training loop with an interactive web UI so the underlying ideas — data, architecture, optimization, generalization — are visible and tunable in real time.
 
-The goal is pedagogical, not industrial: features earn their keep by making something about ML easier to *see* or *feel* (live loss curves, hyperparameters as sliders, freehand inference, data inspection). Projects are numbered in curriculum order and progress from the basics toward what the local hardware can handle.
-
 <p align="center">
   <img src="screenshots/math-symbol-trainer-screenshot1.png" width="220" alt="Math Symbol Trainer" />
   <img src="screenshots/image-classifier-screenshot1.png" width="220" alt="Image Classifier — architecture" />
