@@ -1,6 +1,8 @@
 # ML Learning Apps
 
-A growing suite of small, self-contained applications for learning and experimenting with machine learning. Each project trains a real neural network end-to-end and pairs the training loop with an interactive web UI so the underlying ideas — data, architecture, optimization, generalization — are visible and tunable in real time.
+An experimental suite of small, self-contained applications for learning and visualizing concepts in machine learning. Each project trains a real neural network end-to-end and pairs the training loop with an interactive, accessible web UI.
+
+The apps are still in development; I will be making improvements and adding new ML apps over time.
 
 <p align="center">
   <img src="screenshots/math-symbol-trainer-screenshot1.png" width="220" alt="Math Symbol Trainer" />
