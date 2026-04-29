@@ -20,6 +20,7 @@ ml/
 ├── CLAUDE.md
 ├── 01-mnist-trainer/          # canonical reference project (FastAPI + Svelte)
 ├── 02-math-symbols/           # printed-symbol OCR over synthesized data
+├── 03-image-classifier/       # natural-image classifier on Imagenette (WIP)
 └── NN-<next-project>/         # future
 ```
 
@@ -116,6 +117,28 @@ A printed-symbol OCR classifier covering the glyphs used in mathematical writing
 **Ports.** Same as MNIST: backend on `5041`, Vite dev on `5042`. Override with `MATH_SERVER_PORT`. Only one app can run at a time without overriding.
 
 **Frontend deps beyond the shared stack:** `katex` (loaded globally via `main.ts`) for the Inference tab.
+
+## Image Classifier (`03-image-classifier/`) — work in progress
+
+Photo-classification app modeled on the Math Symbol Trainer's six-tab pipeline but adapted for natural images. Trains on **Imagenette** — fast.ai's 10-class subset of ImageNet — with a fixed 3×96×96 input and a choice of three preset architectures spanning two decades of CNN history. Status: end-to-end functional (download → train → infer); copy + ergonomics still being polished; no `train.py` CLI yet.
+
+### What's different from Math Symbols
+
+1. **Real downloaded data, not synthesized.** First-run flow is one click in the Data Acquisition tab → `urllib` downloads `imagenette2-160.tgz` (~88 MB) → `tarfile` extracts into `data/` → an in-memory `ImagenetteIndex` walks `<split>/<wnid>/*.JPEG`. Augmentation is now a *training-pipeline* concern (random crop, horizontal flip, color jitter) rather than a synthesis-time choice; val images go through deterministic resize + center-crop only. Class set is fixed (10 Imagenette labels) so changing augmentation doesn't invalidate the session — only the in-memory batch is dropped.
+2. **Three preset architectures, plus Custom.** `ml.py:ARCHITECTURE_PRESETS` holds `lenet5` (1998, sequential layer list), `alexnet` (2012, sequential layer list adapted to 96×96 with 1024-wide FC instead of 4096), and `resnet18` (2015, `locked: True`, built directly via `torchvision.models.resnet18(weights=None)` with the FC retargeted to 10 classes). LeNet and AlexNet apply onto the drag-and-drop canvas as editable layer lists; ResNet shows as a single placeholder block in the diagram and bypasses the layer-list builder entirely. Editing a preset clears `architecture.preset` so the selector no longer claims ownership of the canvas.
+3. **`build_model` dispatches on `preset`.** `training.py:build_model(layers, preset, num_classes)` — when `preset == 'resnet18'`, calls `build_resnet18(num_classes)`; otherwise runs `build_layered_model(layers, num_classes)`, which is the same builder Math Symbols uses (conv2d/maxpool2d/flatten/linear/relu/dropout) plus `batchnorm2d`. The implicit final `nn.Linear → num_classes` head is only appended in the layered path; ResNet supplies its own.
+4. **ImageNet normalization in the decode path.** `training.py:_decode_image` divides by 255, subtracts mean `[0.485, 0.456, 0.406]`, divides by std `[0.229, 0.224, 0.225]`, and reshapes HWC→CHW before stacking. ResNet-18 from torchvision was designed for these exact stats so it really matters there; layered architectures benefit from centered inputs anyway.
+5. **Inference is image upload, not text + KaTeX.** `POST /api/inference/predict` accepts a `multipart/form-data` upload, runs it through the val pipeline (resize-shorter → center-crop → encode), classifies, and returns the input PNG + top-5 labels with confidences. `POST /api/inference/sample` pulls a random val image for users without an image to upload — same response shape, plus `true_label` so the UI can render a green ✓ / red ✗ verdict. The Inference tab in the frontend has a drag-drop zone and a "Sample a val image" button; no KaTeX dependency.
+6. **State store is `dataset`, not `synthesis`.** `state.svelte.ts` has a `dataset` $state with `{ loaded, classes, status, augmentation, downloading, downloadStage, downloadFraction }`. `applyArchitecturePreset` writes `architecture.preset` and either replaces the layer list (editable presets) or empties it (locked). `INPUT_SHAPE` is `[3, 96, 96]`. The dataset-change effect only invalidates the *current batch* on augmentation change (class set is fixed) — it does *not* tear down the architecture or session like Math Symbols' synthesis-change effect does.
+7. **Backend file layout.** `ml.py` (Imagenette catalog + presets), `dataset.py` (download + `BatchRequest` + `sample_batch[_iter]` + base64 PNG round-trip), `training.py` (TrainingSession with both layered + locked-preset paths), `server.py` (FastAPI). Mirrors Math Symbols structurally; `synthesis.py` is replaced by `dataset.py`.
+8. **Preset state in checkpoints.** `save_checkpoint` writes `state_dict, layers, preset, hyperparameters, classes, step, dataset_config, loss_history, val_loss_history`. `load_checkpoint` reconstructs the `TrainingSession` via the same `build_model(layers, preset, num_classes)` dispatch. The frontend's `applyCheckpointResponse` sets `architecture.preset` from the response so a saved ResNet-18 reloads with the locked-preset placeholder block, not as an empty layer list.
+9. **One epoch = `ceil(num_train / batch_size)` batches.** Imagenette has ~9469 train images, so a batch_size of 64 gives ~148 batches per epoch. No `samples_per_class_per_epoch` knob (Math Symbols needed it because synthesized data has no inherent epoch boundary; here the dataset is finite). Validation cadence (`validateEveryN`) survives as a tunable hyperparameter.
+
+**Endpoints.** Beyond the shared `/api/device*` and `/api/training/*` shape: `GET /api/dataset/classes`, `GET /api/dataset/status`, `POST /api/dataset/download` (synchronous), `POST /api/dataset/download_stream` (NDJSON progress events from a background thread), `POST /api/dataset/sample[_stream]` (batch with augmentation), `GET /api/architecture/presets`, `POST /api/inference/predict` (multipart upload), `POST /api/inference/sample` (random val image).
+
+**Ports.** Backend on `5041`, Vite dev on `5042`, override via `IMAGE_SERVER_PORT`.
+
+**Extra Python deps.** `python-multipart` for the inference upload endpoint (added at repo root). `torchvision` was already in `pyproject.toml` from MNIST.
 
 ## Adding a new project
 

@@ -7,6 +7,7 @@ dependencies = [
     "fonttools>=4.62.1",
     "matplotlib>=3.10.9",
     "pillow>=12.2.0",
+    "python-multipart>=0.0.27",
     "torch>=2.11.0",
     "torchvision>=0.26.0",
     "uvicorn[standard]>=0.32",
