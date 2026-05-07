@@ -49,12 +49,27 @@ A photo-classification app built around three landmark CNN architectures from th
 
 Status: the full pipeline is functional end-to-end (download → train → infer) and all three preset architectures train successfully. Treat it as a work in progress — copy and ergonomics are still being refined, and a CLI (`train.py`) for headless runs is not yet built.
 
+### `04-agentic-symbols/` — Agentic Symbol Trainer
+
+A reimagining of the Math Symbol Trainer where an embedded **ML Engineer agent** (Claude Opus 4.7, 1M context) can drive the same pipeline the user can — picking categories, designing architectures, training in bounded loops, evaluating against held-out fonts, and saving checkpoints. The agent's tool calls appear in a chat sidebar on the right, and the resulting state changes are mirrored live in the tabbed UI on the left, so you can watch a model get trained in real time.
+
+Key ideas:
+
+- **Two drivers, one pipeline.** The backend holds a single source-of-truth pipeline-state mirror; both the user (via UI controls) and the agent (via ~20 MCP tools) read and write it. Every mutation broadcasts over WebSocket, tagged with its origin, so the two stay in lockstep without fighting each other.
+- **Live charts during agent training.** When the agent calls `train_n_batches`, every gradient step pushes a progress event over the WebSocket, so loss curves and the step counter update tick-by-tick on screen — you don't have to wait for the tool call to return.
+- **Tool-restricted agent.** The agent can only call the MCP tools the app exposes (synthesis, architecture, training, eval, checkpoints, device); no shell, no filesystem access. Each `train_n_batches` call is capped at 200 batches so the agent gets natural decision points to check validation loss and narrate progress.
+- **Resizable chat pane.** Drag the divider between the tab area and the chat to allocate horizontal space; the width persists across reloads.
+- **Session resume.** Past chat sessions are persisted by the SDK and listed in a session menu, so you can come back to a long autonomous training run and pick up where it left off.
+
+Status: end-to-end functional. The six-tab pipeline is forked from Math Symbols and the agent integration is the new piece. Architecturally a proof of concept for human-AI co-driving of an interactive ML training app.
+
 ## Stack
 
 - **PyTorch** on Apple Silicon (MPS); CUDA / CPU paths are kept as fallbacks. Python 3.13.
 - **uv** for Python dependency management — one shared virtual env at the repo root, since PyTorch is large and reinstalling per project is painful.
-- **FastAPI** backends serving REST (and, in the MNIST app, a WebSocket for live training events).
+- **FastAPI** backends serving REST (plus a WebSocket for live training events in the MNIST app, and for state-mirror sync + agent training broadcasts in the Agentic Symbol Trainer).
 - **Svelte 5 + Vite + Tailwind** frontends, served by FastAPI as static `dist/` in production and proxied through the Vite dev server in development.
+- **Claude Agent SDK** (in the Agentic Symbol Trainer only) — an in-process MCP tool server exposes the same pipeline operations the UI drives, and `query()` runs the conversational turns.
 
 ## Quick start
 
@@ -71,9 +86,11 @@ uv sync                                    # creates .venv/ at repo root
 02-math-symbols/run.sh
 # or
 03-image-classifier/run.sh
+# or
+04-agentic-symbols/run.sh
 ```
 
-All three apps default to `http://localhost:5041`. Only one can run at a time without overriding `MNIST_SERVER_PORT` / `MATH_SERVER_PORT` / `IMAGE_SERVER_PORT`.
+All four apps default to `http://localhost:5041`. Only one can run at a time without overriding `MNIST_SERVER_PORT` / `MATH_SERVER_PORT` / `IMAGE_SERVER_PORT` / `AGENTIC_SERVER_PORT`.
 
 For headless / scriptable training, the MNIST project also has a CLI:
 
@@ -89,6 +106,7 @@ uv run python 01-mnist-trainer/train.py --model cnn --epochs 5
 ├── 01-mnist-trainer/             # MLP / CNN trained on MNIST
 ├── 02-math-symbols/              # OCR over synthesized glyphs
 ├── 03-image-classifier/          # natural-image classifier on Imagenette (WIP)
+├── 04-agentic-symbols/           # Math Symbols pipeline + embedded ML Engineer agent
 └── NN-<next-project>/            # future projects, numbered in curriculum order
 ```
 

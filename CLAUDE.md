@@ -21,6 +21,7 @@ ml/
 ├── 01-mnist-trainer/          # canonical reference project (FastAPI + Svelte)
 ├── 02-math-symbols/           # printed-symbol OCR over synthesized data
 ├── 03-image-classifier/       # natural-image classifier on Imagenette (WIP)
+├── 04-agentic-symbols/        # Math Symbols pipeline + embedded ML Engineer agent
 └── NN-<next-project>/         # future
 ```
 
@@ -139,6 +140,44 @@ Photo-classification app modeled on the Math Symbol Trainer's six-tab pipeline b
 **Ports.** Backend on `5041`, Vite dev on `5042`, override via `IMAGE_SERVER_PORT`.
 
 **Extra Python deps.** `python-multipart` for the inference upload endpoint (added at repo root). `torchvision` was already in `pyproject.toml` from MNIST.
+
+## Agentic Symbol Trainer (`04-agentic-symbols/`)
+
+A re-imagining of `02-math-symbols/` where an embedded **ML Engineer agent** (Claude Opus 4.7, 1M context) drives the same pipeline the user can — categories, architecture, training, eval, checkpoints. The user sees the agent's tool calls in a chat sidebar on the right and the resulting state changes mirrored live in the tabbed UI on the left. The synthesis / architecture / training tabs are forked from Math Symbols; the new pieces are the agent runtime, the shared pipeline-state mirror, and the chat pane.
+
+### Architecture differences vs Math Symbols
+
+1. **Shared pipeline-state mirror (backend = source of truth).** `agent_state.py` owns `pipeline_state` (synthesis + architecture + training-prefs slices, mirroring frontend store shapes verbatim so no translation is needed in the WS layer). Both drivers read and write it: the UI via `POST /api/state/patch` (debounced 200ms), the agent via MCP tools that call `apply_patch(...)`. Every mutation broadcasts a `state_patch` (or `state_replace`) over `/ws/state` to all subscribers, tagged with `source: "ui" | "agent" | "system"` so the originator can ignore its own echo. Echo prevention on the frontend uses a `lastSyncedSig` JSON signature: when a WS event arrives we update the sig before applying the patch so the auto-sync `$effect` sees no diff and skips the round-trip.
+
+2. **Agent runtime + MCP tool surface.** `agent_runtime.py` runs one user→assistant turn against the Claude Agent SDK and yields normalized SSE events (text deltas, tool calls, tool results, usage, final result). `agent_tools.py` defines ~20 in-process MCP tools in three layers: read (`get_pipeline_state`, `get_recent_loss`, `list_*`), mutating (`set_symbol_categories`, `set_architecture`, `set_hyperparameters`, `apply_synthesis_preset`), and training (`init_session`, `reset_session`, `train_n_batches`, `eval_on_val`, `save_checkpoint`, `load_checkpoint`, `select_device`). The agent's allowed-tools list is restricted to these — no Read/Write/Bash on the host. `train_n_batches` is bounded (max 200 per call) so each tool turn is short and the agent gets natural narration points.
+
+3. **Live agent-driven training updates.** When the agent calls `train_n_batches`, the tool broadcasts a `training_tick` event over `/ws/state` after every gradient step (with an `await asyncio.sleep(0)` so the WS sender flushes before the next forward pass blocks the loop). Frontend's WS handler in `App.svelte` reduces these into the `training` store: `training_tick` pushes onto `lossHistory` and updates step / lastLoss / lastAccuracy; `validation_tick` pushes onto `valLossHistory`; `training_session` resets or restores the full session state (used by `init_session`, `reset_session`, `load_checkpoint`). Result: loss charts and the step counter on the Training tab update live during a long agent run rather than jumping once when the tool turn returns. These three event types ride the same WebSocket as `state_patch` / `state_replace` but bypass the deep-merge `pipeline_state` model — they're transient progress signals, not shared state.
+
+4. **Chat pane on the right.** `ChatPane.svelte` composes a header bar (`UsageBar` — left-aligned "ML Engineer Chat" label + right-aligned 1M-token-context gauge), `SessionMenu` (resume past chats / new chat), `ChatTranscript`, and a Send/Stop composer. The transcript is reduced from SSE events: `text_delta` appends to the open assistant bubble, `text_message` closes it, `tool_use` opens a tool row (status=running) which flips to success/error when the matching `tool_result` arrives. Past sessions live in `~/.claude/projects/<encoded-cwd>/<id>.jsonl` — `GET /api/agent/sessions` and `/sessions/{id}/messages` read them back to reconstruct transcripts. Pane visibility, active session id, and pane width all persist to localStorage under `agentic-symbols.chat-prefs.v1`.
+
+5. **Resizable chat pane.** A 4px-wide divider sibling renders before the `<aside>` (replacing the old `border-l`); pointerdown captures startX + startWidth, pointermove updates `chat.paneWidth` live (the aside's `style="width:"` and `<main class="flex-1 min-w-0">` reflow on every frame), pointerup persists. Listeners are on `window` so a drag past the chrome still releases cleanly; body cursor + `userSelect` are pinned across the drag. Bounds: min 240px, max `window.innerWidth - 320` so the tab content stays readable. `clampChatPaneWidth()` re-clamps on read of persisted prefs in case the viewport has shrunk between sessions.
+
+### Endpoints
+
+Mirrors Math Symbols' `/api/synthesis/*`, `/api/training/*`, `/api/inference/render`, `/api/device/*`, plus:
+
+- `GET /api/state` / `POST /api/state/patch` — read or deep-merge into the pipeline-state mirror.
+- `WS /ws/state` — first frame is a `state_replace` snapshot; thereafter `state_patch` per mutation, plus `training_session` / `training_tick` / `validation_tick` for live agent-driven training progress.
+- `POST /api/agent/chat` — run one ML Engineer turn (SSE stream of `text_delta` / `text_message` / `tool_use` / `tool_result` / `usage` / `result` / `error`).
+- `POST /api/agent/stop` — cancel the in-flight turn.
+- `GET /api/agent/sessions` and `/sessions/{id}/messages` — list past chat sessions and reconstruct transcripts (raw SDK messages normalized into the same event shape live streams use, so the frontend renderer has one code path).
+
+### Backend file layout
+
+`agent_state.py` (pipeline-state mirror + WS broadcast + `broadcast_event` helper for non-state events), `agent_runtime.py` (one turn through the SDK), `agent_tools.py` (MCP tool definitions + session/device accessor wiring), `agent_system_prompt.md` (the ML Engineer's persona and workflow patterns), plus the unchanged `ml.py`, `synthesis.py`, `training.py`, `server.py` from Math Symbols. No `training_worker.py` (training is synchronous, same as Math Symbols).
+
+### Frontend file layout
+
+Same six-tab structure as Math Symbols (`OrientationTab`, `DataSynthesisTab`, `ArchitectureTab`, `TrainingTab`, `InferenceTab`, `DebriefTab`). New components under `components/chat/`: `ChatPane`, `ChatTranscript`, `UsageBar`, `SessionMenu`, plus `toolLabels.ts` for human-readable tool names. State stores: `chat` (visible, items, activeSessionId, sessions, turn, usage, draft, paneWidth) added alongside the existing `synthesis` / `architecture` / `training` stores.
+
+**Ports.** Backend on `5041`, Vite dev on `5042`. Override via `AGENTIC_SERVER_PORT`. Only one of the four GUI apps can run at a time without overriding ports.
+
+**Extra Python deps.** `claude-agent-sdk` for the in-process MCP tool server and `query()` driver.
 
 ## Adding a new project
 
