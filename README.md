@@ -1,6 +1,6 @@
-# ML Learning Apps
+# Machine Learning Apps
 
-An experimental suite of small, self-contained applications for learning and visualizing concepts in machine learning. Each project trains a real neural network end-to-end and pairs the training loop with an interactive, accessible web UI.
+An experimental suite of small, self-contained applications for learning and visualizing concepts in Machine Learning. Each project trains a real neural network end-to-end and pairs the training loop with an interactive, accessible web UI.
 
 The apps are still in development; I will be making improvements and adding new ML apps over time.
 
@@ -51,7 +51,7 @@ Status: the full pipeline is functional end-to-end (download → train → infer
 
 ### `04-agentic-symbols/` — Agentic Symbol Trainer
 
-A reimagining of the Math Symbol Trainer where an embedded **ML Engineer agent** (Claude Opus 4.7, 1M context) can drive the same pipeline the user can — picking categories, designing architectures, training in bounded loops, evaluating against held-out fonts, and saving checkpoints. The agent's tool calls appear in a chat sidebar on the right, and the resulting state changes are mirrored live in the tabbed UI on the left, so you can watch a model get trained in real time.
+A reimagining of the Math Symbol Trainer where an embedded AI assistant, **ML Engineer** (powered by Claude Opus 4.7, 1M context) can drive the same pipeline the user can — designing architectures, training in bounded loops, adjusting the learning rate and other parameters, and saving checkpoints. ML Engineer will show you the ropes of how a real ML model is trained and can answer your questions and give you advice on how to train better models yourself.
 
 Key ideas:
 
