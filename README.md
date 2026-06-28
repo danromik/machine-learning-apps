@@ -63,13 +63,39 @@ Key ideas:
 
 Status: end-to-end functional. The six-tab pipeline is forked from Math Symbols and the agent integration is the new piece. Architecturally a proof of concept for human-AI co-driving of an interactive ML training app.
 
+### `05-agentic-snake/` — Agentic Snake Trainer
+
+The curriculum's first **reinforcement-learning** project — and, like the Symbol Trainer, an agentic one: an embedded **RL Coach agent** (Claude Opus 4.8, 1M context) drives the same pipeline the user can. There's no dataset; the agent learns to play **Snake** by generating its own experience.
+
+Key ideas:
+
+- **The RL loop, made visible.** The agent learns from *reward*, not labels. Reward shaping is fully exposed (food, death, per-step cost, distance shaping), so you can see how it changes behavior — and how it can backfire.
+- **Three algorithms, side by side.** Tabular **Q-learning** (a literal lookup table of Q-values, no network), **DQN** (deep value-based, replay buffer + target net), and **REINFORCE** (policy gradient) — value-based vs. policy-based, with their different speed/stability tradeoffs as the lesson.
+- **Two observation models.** An engineered **11-feature vector** (tiny and discrete, so tabular Q-learning is feasible — but blind to the snake's own body) vs. the **full grid** as a tensor fed to a small CNN (sees the whole body, but the state space is astronomically large — the canonical motivation for function approximation).
+- **Watch tab** animates a greedy game with a per-step overlay of the agent's Q-values / action probabilities, so you can see what it "thinks."
+- Reuses the Agentic Symbol Trainer's agent layer (shared pipeline-state mirror + chat pane + MCP tools), plus a headless CLI (`train.py`).
+
+### `06-agentic-cube/` — Agentic Cube Trainer
+
+The second RL project: teach a network to **solve a Rubik's Cube**, head-on with the **sparse-reward problem**. A scrambled 3×3 cube has one solved state among ~4.3×10¹⁹, so the trial-and-error RL of the Snake app would never stumble onto it. An embedded **RL Coach** (Claude Opus 4.8, 1M context) drives the pipeline.
+
+Key ideas:
+
+- **Value iteration, not model-free RL.** Instead of waiting for reward, exploit the cube's *known, deterministic model*: learn a **cost-to-go** function (moves-to-solve) by bootstrapping targets from each state's children (a local-hardware take on DeepCubeA), trained on a **reverse-scramble curriculum** (scramble `k` moves from solved, ramp `k` up as each depth is mastered), and paired with a **beam search** at solve time. The 2×2 trains to a genuine full solver in minutes; the 3×3 is best-effort (bundled pretrained checkpoints ship with the app).
+- **Overnight background training.** The RL Coach can launch a long, browser-independent training run that ramps the curriculum and checkpoints itself (resumable). Rather than babysitting it (which would burn tokens), the Coach is woken on a **token-cheap check-in cadence** to review progress, tweak the curriculum, and keep a **live training report** current — shown in a Progress Report tab, with a Coach-written final debrief.
+- **A real 3D cube.** The Watch tab and the Training tab render the cube in **three.js** with physically animated layer turns and drag/zoom, plus selectable color **styles** (Standard / Jewel / Neon and semi-transparent "glass" variants) and synthesized **sound effects** (solve chime, turn clack, unsolved whiff).
+- **Curriculum depth is a knob.** Beyond automatic promotion, the depth `k` is directly settable (a manual stepper + an "auto-advance when solved" toggle), so you can probe exactly where the solver starts to break down.
+- Reuses the agent layer from the previous two apps; headless CLI (`train.py`) is the ground truth.
+
+Status: end-to-end functional, including the background-run + check-in + report subsystems and the bundled pretrained 2×2 / 3×3 checkpoints.
+
 ## Stack
 
 - **PyTorch** on Apple Silicon (MPS); CUDA / CPU paths are kept as fallbacks. Python 3.13.
 - **uv** for Python dependency management — one shared virtual env at the repo root, since PyTorch is large and reinstalling per project is painful.
-- **FastAPI** backends serving REST (plus a WebSocket for live training events in the MNIST app, and for state-mirror sync + agent training broadcasts in the Agentic Symbol Trainer).
-- **Svelte 5 + Vite + Tailwind** frontends, served by FastAPI as static `dist/` in production and proxied through the Vite dev server in development.
-- **Claude Agent SDK** (in the Agentic Symbol Trainer only) — an in-process MCP tool server exposes the same pipeline operations the UI drives, and `query()` runs the conversational turns.
+- **FastAPI** backends serving REST (plus a WebSocket for live training events in the MNIST app, and for state-mirror sync + agent training broadcasts in the three agentic apps).
+- **Svelte 5 + Vite + Tailwind** frontends, served by FastAPI as static `dist/` in production and proxied through the Vite dev server in development. The Cube Trainer adds **three.js** for its 3D cube views.
+- **Claude Agent SDK** (in the three agentic apps — Symbols, Snake, Cube) — an in-process MCP tool server exposes the same pipeline operations the UI drives, and `query()` runs the conversational turns. The Cube Trainer also runs a background training thread and a server-side scheduler that wakes the agent for periodic, token-cheap check-ins on a long run.
 
 ## Quick start
 
@@ -88,9 +114,13 @@ uv sync                                    # creates .venv/ at repo root
 03-image-classifier/run.sh
 # or
 04-agentic-symbols/run.sh
+# or
+05-agentic-snake/run.sh
+# or
+06-agentic-cube/run.sh
 ```
 
-All four apps default to `http://localhost:5041`. Only one can run at a time without overriding `MNIST_SERVER_PORT` / `MATH_SERVER_PORT` / `IMAGE_SERVER_PORT` / `AGENTIC_SERVER_PORT`.
+All apps default to `http://localhost:5041`. Only one can run at a time without overriding its port env var: `MNIST_SERVER_PORT` / `MATH_SERVER_PORT` / `IMAGE_SERVER_PORT` / `AGENTIC_SERVER_PORT` / `SNAKE_SERVER_PORT` / `CUBE_SERVER_PORT`.
 
 For headless / scriptable training, the MNIST project also has a CLI:
 
@@ -107,6 +137,8 @@ uv run python 01-mnist-trainer/train.py --model cnn --epochs 5
 ├── 02-math-symbols/              # OCR over synthesized glyphs
 ├── 03-image-classifier/          # natural-image classifier on Imagenette (WIP)
 ├── 04-agentic-symbols/           # Math Symbols pipeline + embedded ML Engineer agent
+├── 05-agentic-snake/             # reinforcement learning: Snake + embedded RL Coach agent
+├── 06-agentic-cube/              # RL on a Rubik's Cube: value iteration + reverse-scramble curriculum + RL Coach
 └── NN-<next-project>/            # future projects, numbered in curriculum order
 ```
 

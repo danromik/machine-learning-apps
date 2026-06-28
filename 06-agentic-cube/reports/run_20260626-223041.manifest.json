@@ -1,0 +1,21 @@
+{
+  "run_id": "20260626-223041",
+  "config": {
+    "cube_size": 3,
+    "start_k": 1,
+    "max_k": 14,
+    "promote_at": 0.9,
+    "max_iterations": 0,
+    "max_wall_seconds": 0,
+    "eval_every": 100,
+    "eval_n": 80,
+    "checkpoint_every": 500,
+    "cadence_minutes": 3.0,
+    "coach_session_id": null
+  },
+  "iteration": 1500,
+  "current_k": 11,
+  "checkpoint": "autorun_20260626-223041.pt",
+  "state": "stopping",
+  "updated_at": 1782538340.099334
+}
