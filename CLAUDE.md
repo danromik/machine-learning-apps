@@ -24,6 +24,7 @@ ml/
 ├── 04-agentic-symbols/        # Math Symbols pipeline + embedded ML Engineer agent
 ├── 05-agentic-snake/          # Reinforcement learning: Snake + embedded RL Coach agent
 ├── 06-agentic-cube/           # RL on a Rubik's Cube: value iteration + reverse-scramble curriculum + RL Coach
+├── 07-languagemodel/          # small GPT trained from scratch on TinyStories (CLI-only)
 └── NN-<next-project>/         # future
 ```
 
@@ -445,6 +446,86 @@ Theme** controls bottom-right. The WS reducer in `App.svelte` handles `state_*` 
 
 **Extra deps.** Frontend adds **`three`** (three.js + `OrbitControls`) for the 3D
 views; dropped `katex`. No new Python deps (`claude-agent-sdk` already present).
+
+**Gitignored output.** `06-agentic-cube/.gitignore` excludes `reports/` (generated
+reports + run manifests). The few reports committed before that rule remain tracked.
+
+## Language Model (`07-languagemodel/`)
+
+The curriculum's first **generative / sequence** project: a GPT-2-style decoder-only
+transformer trained from scratch on **TinyStories** (about 2.7M simple stories from
+GPT-3.5/GPT-4) with next-token prediction. **CLI-only by design**: there is no
+`server.py` or `frontend/`. The teaching surface is a live `rich` terminal dashboard
+(progress bar, stats grid, loss sparkline, latest sample) with single-key controls.
+Full user docs are in `07-languagemodel/README.md`.
+
+### Deviations from the standard project shape
+
+- **No `models.py`/`ml.py`.** Instead it is split into single-purpose modules.
+  `paths.py` owns the path constants (`DATA_DIR`, `TOKENIZER_DIR`, `CKPT_DIR`,
+  `RUNS_DIR`, created on import, and `raw_path(split)`), and every other module
+  imports its paths from there. `model.py` holds `GPTConfig` + `GPT` +
+  `pick_device`. Scripts use bare sibling imports (`from paths import …`), so run
+  them as `uv run python 07-languagemodel/<script>.py` (the script dir lands on
+  `sys.path`).
+- **Run directories instead of a flat `checkpoints/`.** `train.py` writes
+  `runs/<YYYYmmdd-HHMMSS>[-name]/` with `config.json`, `metrics.jsonl` (one record
+  per eval), `samples.txt` (a sample every `sample_every` steps), `ckpt-best.pt` (on
+  val improvement) and `ckpt-last.pt` (periodic + at exit). `CKPT_DIR` exists but is
+  currently unused.
+- **No GUI ⇒ no ports/env vars.** It can run alongside any of the web apps.
+
+### Pipeline
+
+- **`tokenizer.py`**: byte-level BPE (HF `tokenizers`), default vocab
+  **8192**, special token `<|endoftext|>`, trained on the **valid** split (enough
+  text, much faster than train). Saved as `tokenizer/bpe-<V>.json`. This file
+  **is committed**, so `.bin` encodings and checkpoints stay consistent across
+  clones. Retraining it invalidates both.
+- **`data.py`**: downloads `TinyStoriesV2-GPT4-{train,valid}.txt` from HuggingFace
+  (`rich` progress, `.part` + rename) and encodes each split into a flat **`uint16`**
+  token file `data/<split>-bpe<V>.bin`. Stories are split on `<|endoftext|>` lines,
+  batch-encoded, and EOT-terminated. `load_tokens` memmaps the file, and
+  `get_batch` samples random `block_size` windows (x, y shifted by 1).
+  `python data.py <split>` = download + encode. Train ≈ 2.2 GB raw → ~536M tokens.
+- **`model.py`**: `GPT`: learned positional embeddings, pre-LN blocks,
+  causal SDPA attention (`is_causal=True`), GELU MLP (4×), **weight tying** (wte ↔
+  lm_head), GPT-2 init with scaled `c_proj` init (`0.02/√(2·n_layer)`), no biases
+  by default. In inference (`targets=None`), forward computes only the last
+  position's logits. `generate` uses temperature + top-k and stops early on EOT.
+  `configure_optimizers` returns AdamW with decay only on ≥2-D params,
+  betas (0.9, 0.95). Default 6L/6H/384d, ctx 256 → **~13.9M params**.
+- **`engine.py`**: `TrainConfig` dataclass, `lr_at` (linear warmup → cosine
+  to `min_lr_frac·lr`), `set_lr`, `train_step` (returns loss + clipped grad norm),
+  `estimate_loss` (eval mode, `eval_batches` random val batches).
+- **`checkpoint.py`**: atomic `torch.save` (`.tmp` → rename) of model, optimizer,
+  both configs (as dicts), step, elapsed, best_val, history, and torch/python/numpy
+  RNG states. `rebuild(ckpt, device)` reconstructs everything and restores the RNG.
+- **`train.py`**: argparse CLI over model + train hyperparams. `--resume PATH`
+  takes the configs from the checkpoint but **overrides `max_steps` from the CLI**,
+  so finished runs can be extended (the cosine schedule stretches). Key controls
+  run through `console.KeyReader` (cbreak-mode stdin thread, no-op when stdin
+  isn't a TTY): `space` pause, `s` save, `g` sample, `e` eval, `+`/`-` scale the
+  peak LR ×/÷1.5 (hot-swap), `q` quit (saves `ckpt-last.pt`).
+- **`sample.py`**: `sample.py <ckpt> --prompt … --num-samples N --temperature
+  --top-k --seed`. Seeds *after* `rebuild` because rebuild restores the training RNG.
+- **`console.py`**: `Dashboard` (rich `Group` of progress + stats + sparkline +
+  sample + status), `KeyReader`, `sparkline` (bucket-averaged to 60 cols),
+  `format_time`.
+
+Smoke tests via `__main__`: `model.py` (forward pass + expected initial loss
+ln V ≈ 9.01), `engine.py` (200-step mini-train + sample), `tokenizer.py` (round
+trip).
+
+**Reference run** (`runs/20260923-010925-fullpass`, MPS): 65k steps × bs 32 × ctx
+256 ≈ one epoch, warmup 1000, lr 1e-3. Took ~4.8 h. Val loss went 2.47 (1k) →
+**1.37** (65k), and the samples are coherent multi-sentence stories.
+
+**Gitignored.** `07-languagemodel/.gitignore` excludes `data/`, `runs/`,
+`checkpoints/`, `*.pt`, and `.part`/`.tmp` partials. Only source + the tokenizer
+JSON are committed.
+
+**Extra Python deps.** `tokenizers`, `numpy`, `rich` (added at repo root).
 
 ## Adding a new project
 

@@ -1,0 +1,9 @@
+# Downloaded TinyStories corpus + tokenized .bin files (re-created by data.py)
+data/
+# Training runs: checkpoints, metrics, samples (re-created by train.py)
+runs/
+checkpoints/
+*.pt
+*.part
+*.tmp
+__pycache__/

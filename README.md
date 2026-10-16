@@ -1,6 +1,6 @@
 # Machine Learning Apps
 
-An experimental suite of small, self-contained applications for learning and visualizing concepts in Machine Learning. Each project trains a real neural network end-to-end and pairs the training loop with an interactive, accessible web UI.
+An experimental suite of small, self-contained applications for learning and visualizing concepts in Machine Learning. Each project trains a real neural network end-to-end and pairs the training loop with an interactive, accessible web UI (or, for the Language Model, a live terminal dashboard).
 
 The apps are still in development; I will be making improvements and adding new ML apps over time.
 
@@ -89,9 +89,21 @@ Key ideas:
 
 Status: end-to-end functional, including the background-run + check-in + report subsystems and the bundled pretrained 2×2 / 3×3 checkpoints.
 
+### `07-languagemodel/` — Language Model (TinyStories GPT)
+
+The first generative model in the series. It trains a small **GPT-style decoder-only transformer** (~14M parameters) from scratch on **TinyStories**, a corpus of about 2.7M simple children's stories, using next-token prediction. Unlike the earlier apps, this one is **CLI-only by design**. Training runs in a live terminal dashboard (built with `rich`) that shows progress, stats, a loss sparkline, and generated samples. You can see the model's writing go from babble to coherent little stories as training goes on.
+
+- **The full LM pipeline, end to end.** Download the corpus, train a byte-level **BPE tokenizer** (8192 tokens), encode the stories into a memory-mapped token file, train with AdamW + warmup/cosine LR + gradient clipping, and then sample with temperature + top-k.
+- **A readable GPT.** Causal multi-head self-attention, pre-LayerNorm blocks, weight tying between the embedding and output layers, and GPT-2-style init, all in about 200 lines.
+- **Interactive training from the keyboard.** Pause, save, sample, eval, or nudge the learning rate mid-run. Checkpoints are fully resumable, and a finished run can be extended.
+- **Reference result.** One pass over the training set (~532M tokens) takes ~5 hours on an Apple Silicon Mac and reaches a validation loss of ~1.37, with fluent multi-sentence stories.
+
+See [`07-languagemodel/README.md`](07-languagemodel/README.md) for usage.
+
 ## Stack
 
 - **PyTorch** on Apple Silicon (MPS); CUDA / CPU paths are kept as fallbacks. Python 3.13.
+- **HuggingFace `tokenizers`** + **`rich`** for the Language Model's BPE tokenizer and terminal dashboard.
 - **uv** for Python dependency management — one shared virtual env at the repo root, since PyTorch is large and reinstalling per project is painful.
 - **FastAPI** backends serving REST (plus a WebSocket for live training events in the MNIST app, and for state-mirror sync + agent training broadcasts in the three agentic apps).
 - **Svelte 5 + Vite + Tailwind** frontends, served by FastAPI as static `dist/` in production and proxied through the Vite dev server in development. The Cube Trainer adds **three.js** for its 3D cube views.
@@ -128,6 +140,15 @@ For headless / scriptable training, the MNIST project also has a CLI:
 uv run python 01-mnist-trainer/train.py --model cnn --epochs 5
 ```
 
+The Language Model is a CLI app. It has no web UI or port:
+
+```bash
+uv run python 07-languagemodel/data.py valid     # download + tokenize TinyStories
+uv run python 07-languagemodel/data.py train     # (~2.2 GB download)
+uv run python 07-languagemodel/train.py --name mytest
+uv run python 07-languagemodel/sample.py 07-languagemodel/runs/<run>/ckpt-best.pt
+```
+
 ## Repo layout
 
 ```
@@ -139,6 +160,7 @@ uv run python 01-mnist-trainer/train.py --model cnn --epochs 5
 ├── 04-agentic-symbols/           # Math Symbols pipeline + embedded ML Engineer agent
 ├── 05-agentic-snake/             # reinforcement learning: Snake + embedded RL Coach agent
 ├── 06-agentic-cube/              # RL on a Rubik's Cube: value iteration + reverse-scramble curriculum + RL Coach
+├── 07-languagemodel/             # small GPT trained from scratch on TinyStories (CLI)
 └── NN-<next-project>/            # future projects, numbered in curriculum order
 ```
 
